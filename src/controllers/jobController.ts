@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import db from '../config/db';
 import { errorResponse, successResponse } from '../utilities/responseWrapper';
 import dayjs from 'dayjs';
-import { getAvailableTimings, getGeneralSetting, getTerms, timeStringToMinutes } from '../utilities/commonMethords';
+import { getGeneralSetting, getTerms, timeStringToMinutes } from '../utilities/commonMethords';
 
 interface Rate {
   HouseSize: string;
@@ -352,6 +352,33 @@ export const getTermsAPI = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
+const getAvailableTimings = (
+  allocated: { st: number; end: number }[],
+  reqTime: number,
+  duration: number,
+  breakTime: number,
+  min_time: number,
+  max_time: number
+): string[] => {
+  const result: string[] = [];
+  const totalRequired = duration + breakTime;
+  allocated.sort((a, b) => a.st - b.st);
+  allocated.push({ st: max_time + 1, end: max_time + 1 });
+
+  let current = Math.max(reqTime, min_time);
+
+  for (const slot of allocated) {
+    if (slot.st - current >= totalRequired) {
+      const hours = Math.floor(current / 60);
+      const minutes = current % 60;
+      result.push(`${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`);
+    }
+    current = Math.max(current, slot.end);
+  }
+
+  return result;
+};
+
 export const getHelpersWithAvailableSlots = async (req: Request, res: Response): Promise<void> => {
   try {
     const {
@@ -360,7 +387,7 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
       date,
       jobDuration,
       breakMinutes,
-      requestedStartTime
+      requestedStartTime,
     } = req.body;
 
     if (!Mobilenos || !UserMobile || !date || !jobDuration || !requestedStartTime) {
@@ -370,22 +397,17 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
 
     const mobileNosArr = Mobilenos.split(',').map((m: string) => m.trim());
 
-    // ===== Validate Time =====
     const now = dayjs();
     const today = now.format('DD-MM-YYYY');
     const currentMins = now.hour() * 60 + now.minute();
-
     const reqTime = dayjs(`${date} ${requestedStartTime}`, 'DD-MM-YYYY hh:mm A');
     const reqMins = reqTime.hour() * 60 + reqTime.minute();
 
     if (date === today && reqMins < currentMins) {
-      res.status(400).json({
-        error: 'Requested start time is already in the past.'
-      });
+      res.status(400).json({ error: 'Requested start time is in the past.' });
       return;
     }
 
-    // ===== Fetch Helpers =====
     const activeHelpers = await db('ZufyHelper')
       .whereIn('HelperMobileNo', mobileNosArr)
       .andWhere('HelperStatus', 'Active');
@@ -394,9 +416,10 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
       (a, b) => mobileNosArr.indexOf(a.HelperMobileNo) - mobileNosArr.indexOf(b.HelperMobileNo)
     );
 
-    const breakTimeMins = typeof breakMinutes === 'number'
-      ? breakMinutes
-      : await getGeneralSetting('BreakHours');
+    const breakTimeMins =
+      typeof breakMinutes === 'number'
+        ? breakMinutes
+        : await getGeneralSetting('BreakHours');
 
     const availRecords = await db('HelperAvailabiltyTracking')
       .select('*')
@@ -411,7 +434,6 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
 
     const min_time = 360;
     const max_time = 1080;
-
     const results = [];
 
     for (const helper of activeHelpers) {
@@ -421,21 +443,23 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
         (r) => r.HelperMobileNo === helperMobile
       );
 
-      const allocated_hours = helperRecords.map((r) => ({
-        st: timeStringToMinutes(dayjs(r.BlockedDateTime).format('HH:mm')),
-        end: timeStringToMinutes(dayjs(r.BreakTime).format('HH:mm')),
-      }));
+      const allocated_hours = helperRecords.map((r) => {
+        const st = timeStringToMinutes(dayjs(r.BlockedDateTime).format('HH:mm'));
+        const end = r.BreakTime
+          ? timeStringToMinutes(dayjs(r.BreakTime).format('HH:mm'))
+          : st + 30; // Fallback to 30 min slot
+        return { st, end };
+      });
 
       const availableTimings = getAvailableTimings(
         allocated_hours,
         reqMins,
-        jobDuration,
+        parseInt(jobDuration, 10),
         breakTimeMins,
         min_time,
         max_time
       );
 
-      // ===== Ratings & Orders =====
       const ratingData = await db('OrderToHelper')
         .select(
           db.raw(`
@@ -471,7 +495,6 @@ export const getHelpersWithAvailableSlots = async (req: Request, res: Response):
         KycVerified: helper.KycVerified,
         availableTimings,
         HelperRating: totalAverageValue,
-        // totalOrderCount: totalOrderCount?.count ?? 0,
         userOrderCount: userOrderCount?.count ?? 0,
       });
     }
