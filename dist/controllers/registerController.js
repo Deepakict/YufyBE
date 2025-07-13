@@ -16,54 +16,42 @@ exports.registerUser = void 0;
 const db_1 = __importDefault(require("../config/db"));
 const jwtService_1 = __importDefault(require("../services/jwtService"));
 const cryptoService_1 = __importDefault(require("../services/cryptoService"));
-const responseWrapper_1 = require("../utilities/responseWrapper");
 const registerUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const { ContactNumber, Name, ReferralCode = '' } = req.body;
-        if (!ContactNumber || !Name) {
-            return (0, responseWrapper_1.errorResponse)(res, 'Contact number and name are required');
-        }
-        const existingUser = yield (0, db_1.default)('ZufyUserData').where({ ContactNumber }).first();
-        if (existingUser) {
-            return (0, responseWrapper_1.errorResponse)(res, 'This contact is already in use');
-        }
-        const validReferral = ReferralCode &&
-            ((yield (0, db_1.default)('CouponsTable').where({ CouponCode: ReferralCode }).first()) ||
-                (yield (0, db_1.default)('ZufyUserData').where({ UserCode: ReferralCode }).first()));
-        if (ReferralCode !== '' && !validReferral) {
-            return (0, responseWrapper_1.errorResponse)(res, 'Invalid Referral/Coupon code');
-        }
-        const encryptedPassword = cryptoService_1.default.encrypt(ContactNumber); // Password = ContactNumber (encrypted)
-        const userPayload = {
-            ContactNumber,
-            Name,
-            ReferralCode: ReferralCode || null,
-            Password: encryptedPassword,
-            CreatedDate: new Date(),
-            IsActive: true
-        };
-        yield (0, db_1.default)('ZufyUserData').insert(userPayload);
-        yield (0, db_1.default)('UserWallet').insert({
-            UserMobileNo: ContactNumber,
-            UserAmountInWallet: '0',
-            UserWalletId: generateWalletId()
-        });
-        yield (0, db_1.default)('UserFeedBackInfo').insert({
-            MobileNo: ContactNumber,
-            FiveStar: 1,
-            FourStar: 0,
-            ThreeStar: 0,
-            TwoStar: 0,
-            OneStar: 0,
-            TotalRatingGet: 0
-        });
-        const token = jwtService_1.default.generateToken({ mobile: ContactNumber });
-        return (0, responseWrapper_1.successResponse)(res, 'Signup successful', { token });
+    const data = req.body;
+    const mobile = data.ContactNumber;
+    const existingUser = yield (0, db_1.default)('ZufyUserData').where({ ContactNumber: mobile }).first();
+    if (existingUser) {
+        res.status(400).json({ error: 'This contact is already in use' });
+        return;
     }
-    catch (err) {
-        console.error('Register Error:', err);
-        return (0, responseWrapper_1.errorResponse)(res, 'Internal Server Error', 500, 'Server Error');
+    const validReferral = (yield (0, db_1.default)('CouponsTables').where({ CouponCode: data.ReferralCode }).first())
+        || (yield (0, db_1.default)('ZufyUserData').where({ UserCode: data.ReferralCode }).first());
+    if (!validReferral && data.ReferralCode !== '') {
+        res.status(400).json({ error: 'Invalid Referral/Coupon code' });
+        return;
     }
+    // Add user
+    const encryptedPassword = cryptoService_1.default.encrypt(data.Password);
+    const userPayload = Object.assign(Object.assign({}, data), { Password: encryptedPassword, CreatedDate: new Date() });
+    yield (0, db_1.default)('ZufyUserData').insert(userPayload);
+    // Create wallet
+    yield (0, db_1.default)('UserWallets').insert({
+        UserMobileNo: mobile,
+        UserAmountInWallet: '0',
+        UserWalletId: generateWalletId()
+    });
+    // Add feedback entry
+    yield (0, db_1.default)('UserFeedBackInfo').insert({
+        MobileNo: mobile,
+        FiveStar: 1,
+        FourStar: 0,
+        ThreeStar: 0,
+        TwoStar: 0,
+        OneStar: 0,
+        TotalRatingGet: 0
+    });
+    const token = jwtService_1.default.generateToken({ mobile });
+    res.status(200).json({ message: 'Signup successful', token });
 });
 exports.registerUser = registerUser;
 function generateWalletId() {
