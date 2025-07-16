@@ -2,10 +2,34 @@ import { Request, Response } from 'express';
 import db from '../config/db';
 import { errorResponse, successResponse } from '../utilities/responseWrapper';
 import dayjs from 'dayjs';
+import moment from 'moment';
 import { getGeneralSetting, getTerms, timeStringToMinutes } from '../utilities/commonMethords';
 
 interface Rate {
   HouseSize: string;
+}
+export interface HelperWithSlot {
+  HelperMobileNo: string;
+  HelperName: string;
+  HelperLanguageSpeak: string;
+  HelperImage: string;
+  KycVerified: number;
+  availableTimings: {
+    returnValue: string;
+    suggested_t1: string;
+    suggested_t2: string;
+  };
+  HelperRating: number;
+  userOrderCount: number;
+}
+export interface ZufyHelper {
+  HelperMobileNo: string;
+  HelperName: string;
+  HelperLanguageSpeak: string;
+  HelperImage: string;
+  KycVerified: number;
+  HelperCurrentLat?: number | null;
+  HelperCurrentLong?: number | null;
 }
 
 export const getJobListsOrder = async (req: Request, res: Response): Promise<void> => {
@@ -170,104 +194,6 @@ export const getJobListsOrder = async (req: Request, res: Response): Promise<voi
   }
 };
 
-
-export const getSuggestedHelpers = async (req: Request, res: Response): Promise<void> => {
-  const { Mobilenos, UserMobile } = req.body;
-
-  if (!Mobilenos || !UserMobile) {
-    errorResponse(res, 'Mobilenos and UserMobile are required', 400);
-    return;
-  }
-
-  try {
-    const mobileNosArr = Mobilenos.split(',');
-
-    const activeHelpers = await db('ZufyHelper')
-      .whereIn('HelperMobileNo', mobileNosArr)
-      .andWhere('HelperStatus', 'Active');
-    console.log("activeHelpers", activeHelpers)
-    activeHelpers.sort((a, b) => mobileNosArr.indexOf(a.HelperMobileNo) - mobileNosArr.indexOf(b.HelperMobileNo));
-
-    const results = [];
-
-    for (const helper of activeHelpers) {
-      if (!helper.HelperCurrentLat && !helper.HelperCurrentLong) continue;
-
-      const helperMobile = helper.HelperMobileNo;
-
-      const checkBlocked = await db('BlockedHelper')
-        .where(function () {
-          this.where({ BlockedTo: helperMobile, BlockedBy: UserMobile })
-            .orWhere({ BlockedBy: helperMobile, BlockedTo: UserMobile });
-        });
-
-      const blockedUserCountRaw = await db.raw(
-        `SELECT COUNT(*) as count FROM ref_Blockuser WHERE user_mobile = ? AND helper_mobile = ?`,
-        [UserMobile, helperMobile]
-      );
-      const checkUserBlockedCount = blockedUserCountRaw[0]?.[0]?.count || 0;
-
-      if (checkBlocked.length > 0 || checkUserBlockedCount > 0) continue;
-
-      const ratingData = await db('OrderToHelper')
-        .select(
-          db.raw(`
-            ROUND(
-              (AVG(COALESCE(WorkRating, 0)) + AVG(COALESCE(BehaviourRating, 0)) + AVG(COALESCE(PunctualityRating, 0))) / 3, 2
-            ) as totalavg
-          `)
-        )
-        .where({ OrderSendedTo: helperMobile, RatingFlag: 1 })
-        .first();
-
-      const totalAverageValue = ratingData?.totalavg || 0;
-
-      const [totalOrderCount, userOrderCount, totalFavCount, userFavCount] = await Promise.all([
-        db('OrderToHelper').count('* as count').where({ OrderSendedTo: helperMobile, OrderStatus: 'Completed' }).first(),
-        db('OrderToHelper').count('* as count').where({ OrderSendedTo: helperMobile, OrderStatus: 'Completed', OrderBy: UserMobile }).first(),
-        db('FavouriteHelper').count('* as count').where({ FavouriteTo: helperMobile }).first(),
-        db('FavouriteHelper').count('* as count').where({ FavouriteTo: helperMobile, FavouriteBy: UserMobile }).first()
-      ]);
-
-      const [BreakHours, IdleHours, ForceIdleHours] = await Promise.all([
-        getGeneralSetting('BreakHours'),
-        getGeneralSetting('IdleHours'),
-        getGeneralSetting('ForceIdleHours')
-      ]);
-
-      const UserTerms = await getTerms('UserTerms');
-
-      results.push({
-        HelperMobileNo: helper.HelperMobileNo,
-        HelperName: helper.HelperName,
-        HelperLanguageSpeak: helper.HelperLanguageSpeak,
-        HelperImage: helper.HelperImage,
-        KycVerified: helper.KycVerified,
-        HelperRating: parseFloat(totalAverageValue.toFixed(1)),
-        totalOrderCount: totalOrderCount?.count ?? 0,
-        userOrderCount: userOrderCount?.count ?? 0,
-        totalFavCount: totalFavCount?.count ?? 0,
-        userFavCount: userFavCount?.count ?? 0,
-        BreakHours,
-        IdleHours,
-        ForceIdleHours,
-        UserTerms
-      });
-    }
-
-    successResponse(res, 'Suggested helpers fetched successfully', results);
-  } catch (error) {
-    console.error('Error in getSuggestedHelpers:', error);
-    await db('WebhookLog').insert({
-      Message: (error instanceof Error ? error.toString() : String(error)),
-      Date: new Date(),
-      PaymentStatus: 'getSuggestedHelpers',
-      RazorpayOrderid: 'UserRequestController'
-    });
-    errorResponse(res, 'Internal server error', 500);
-  }
-};
-
 export const getHelperAvailabilityDetails = async (req: Request, res: Response): Promise<void> => {
   const { HelperNumbers, RequestDates } = req.body;
 
@@ -352,160 +278,142 @@ export const getTermsAPI = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
-const getAvailableTimings = (
-  allocated: { st: number; end: number }[],
-  reqTime: number,
-  duration: number,
-  breakTime: number,
-  min_time: number,
-  max_time: number
-): string[] => {
-  const result: string[] = [];
-  const totalRequired = duration + breakTime;
-  allocated.sort((a, b) => a.st - b.st);
-  allocated.push({ st: max_time + 1, end: max_time + 1 });
 
-  let current = Math.max(reqTime, min_time);
+function getTimeAsMinutes(time: string): number {
+  const [hour, minute] = time.split(':').map(Number);
+  return isNaN(hour) || isNaN(minute) ? NaN : hour * 60 + minute;
+}
 
-  for (const slot of allocated) {
-    if (slot.st - current >= totalRequired) {
-      const hours = Math.floor(current / 60);
-      const minutes = current % 60;
-      result.push(`${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`);
-    }
-    current = Math.max(current, slot.end);
+function convertMinutesToTime(mins: number): string {
+  if (isNaN(mins)) return 'NA';
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+}
+
+function checkAvailableTime(
+  blocked: { st: number; end: number }[],
+  selectedMins: number,
+  jobDuration: number
+): {
+  returnValue: string;
+  suggested_t1: string;
+  suggested_t2: string;
+} {
+  if (isNaN(selectedMins)) {
+    return {
+      returnValue: 'NA',
+      suggested_t1: 'NA',
+      suggested_t2: 'NA',
+    };
   }
 
-  return result;
-};
+  let isAvailable = true;
 
-export const getHelpersWithAvailableSlots = async (req: Request, res: Response): Promise<void> => {
+  for (const { st, end } of blocked) {
+    if (
+      (selectedMins >= st && selectedMins < end) ||
+      (selectedMins + jobDuration > st && selectedMins + jobDuration <= end)
+    ) {
+      isAvailable = false;
+      break;
+    }
+  }
+
+  if (isAvailable) {
+    return {
+      returnValue: convertMinutesToTime(selectedMins),
+      suggested_t1: 'NA',
+      suggested_t2: 'NA',
+    };
+  } else {
+    const t1 = selectedMins - jobDuration >= 420 ? selectedMins - jobDuration : null;
+    const t2 = selectedMins + jobDuration <= 1200 ? selectedMins + jobDuration : null;
+    return {
+      returnValue: 'NA',
+      suggested_t1: t1 ? convertMinutesToTime(t1) : 'NA',
+      suggested_t2: t2 ? convertMinutesToTime(t2) : 'NA',
+    };
+  }
+}
+
+export const getSuggestedHelpers = async (req: Request, res: Response): Promise<void> => {
   try {
-    const {
-      Mobilenos,
-      UserMobile,
-      date,
-      jobDuration,
-      breakMinutes,
-      requestedStartTime,
-    } = req.body;
+    const { Mobilenos, UserMobile, date, requestedStartTime, jobDuration } = req.body;
 
-    if (!Mobilenos || !UserMobile || !date || !jobDuration || !requestedStartTime) {
-      res.status(400).json({ error: 'Missing required fields' });
-      return;
-    }
+    // ✅ Convert DD-MM-YYYY to YYYY-MM-DD for SQL query
+    const sqlDate = moment(date, 'DD-MM-YYYY').format('YYYY-MM-DD');
+    const mobileNosArr = Mobilenos.split(',');
 
-    const mobileNosArr = Mobilenos.split(',').map((m: string) => m.trim());
-
-    const now = dayjs();
-    const today = now.format('DD-MM-YYYY');
-    const currentMins = now.hour() * 60 + now.minute();
-    const reqTime = dayjs(`${date} ${requestedStartTime}`, 'DD-MM-YYYY hh:mm A');
-    const reqMins = reqTime.hour() * 60 + reqTime.minute();
-
-    if (date === today && reqMins < currentMins) {
-      res.status(400).json({ error: 'Requested start time is in the past.' });
-      return;
-    }
-
-    const activeHelpers = await db('ZufyHelper')
+    const activeHelpersRaw = await db('ZufyHelper')
       .whereIn('HelperMobileNo', mobileNosArr)
-      .andWhere('HelperStatus', 'Active');
+      .andWhere({ HelperStatus: 'Active' });
 
-    activeHelpers.sort(
-      (a, b) => mobileNosArr.indexOf(a.HelperMobileNo) - mobileNosArr.indexOf(b.HelperMobileNo)
-    );
+    const activeHelpers = mobileNosArr
+      .map((mobile: string) =>
+        activeHelpersRaw.find((helper: any) => helper.HelperMobileNo === mobile)
+      )
+      .filter(Boolean);
 
-    const breakTimeMins =
-      typeof breakMinutes === 'number'
-        ? breakMinutes
-        : await getGeneralSetting('BreakHours');
-
-    const availRecords = await db('HelperAvailabiltyTracking')
-      .select('*')
-      .whereIn('HelperMobileNo', mobileNosArr);
-
-    const filteredRecords = availRecords.filter((row) => {
-      const blockedDate = row.BlockedDateTime
-        ? dayjs(row.BlockedDateTime).format('DD-MM-YYYY')
-        : '';
-      return blockedDate === date;
-    });
-
-    const min_time = 360;
-    const max_time = 1080;
     const results = [];
+
+    // ✅ Ensure time is parsed from both 12-hr and 24-hr
+    const time24 = moment(requestedStartTime, ['hh:mm A', 'HH:mm']).format('HH:mm');
+    const selectedMins = getTimeAsMinutes(time24);
 
     for (const helper of activeHelpers) {
       const helperMobile = helper.HelperMobileNo;
 
-      const helperRecords = filteredRecords.filter(
-        (r) => r.HelperMobileNo === helperMobile
-      );
+      const tracking = await db('HelperAvailabiltyTracking')
+        .whereRaw('CAST(BlockedDateTime AS DATE) = ?', [sqlDate])
+        .andWhere({ HelperMobileNo: helperMobile });
 
-      const allocated_hours = helperRecords.map((r) => {
-        const st = timeStringToMinutes(dayjs(r.BlockedDateTime).format('HH:mm'));
-        const end = r.BreakTime
-          ? timeStringToMinutes(dayjs(r.BreakTime).format('HH:mm'))
-          : st + 30; // Fallback to 30 min slot
-        return { st, end };
+      const blocked = tracking.map((record: any) => {
+        const start = new Date(record.BlockedDateTime);
+        const end = new Date(record.ReleaseDateTime);
+        return {
+          st: start.getHours() * 60 + start.getMinutes(),
+          end: end.getHours() * 60 + end.getMinutes(),
+        };
       });
 
-      const availableTimings = getAvailableTimings(
-        allocated_hours,
-        reqMins,
-        parseInt(jobDuration, 10),
-        breakTimeMins,
-        min_time,
-        max_time
-      );
+      const availableTimings = checkAvailableTime(blocked, selectedMins, jobDuration);
 
-      const ratingData = await db('OrderToHelper')
-        .select(
-          db.raw(`
-            ROUND(
-              (AVG(COALESCE(WorkRating, 0)) + AVG(COALESCE(BehaviourRating, 0)) + AVG(COALESCE(PunctualityRating, 0))) / 3, 2
-            ) as totalavg
-          `)
-        )
-        .where({ OrderSendedTo: helperMobile, RatingFlag: 1 })
+      const userOrderCount = await db('OrderToHelper')
+        .where({
+          OrderSendedTo: helperMobile,
+          OrderBy: UserMobile,
+          OrderStatus: 'Completed',
+        })
+        .count('* as count')
         .first();
 
-      const totalAverageValue = ratingData?.totalavg || 0;
-
-      const [totalOrderCount, userOrderCount] = await Promise.all([
-        db('OrderToHelper').count('* as count')
-          .where({ OrderSendedTo: helperMobile, OrderStatus: 'Completed' })
-          .first(),
-
-        db('OrderToHelper').count('* as count')
-          .where({
-            OrderSendedTo: helperMobile,
-            OrderStatus: 'Completed',
-            OrderBy: UserMobile
-          })
-          .first()
-      ]);
+      const avgRatingRow = await db('OrderToHelper')
+        .where({ OrderSendedTo: helperMobile, RatingFlag: 1 })
+        .avg({
+          avg: db.raw(
+            '((ISNULL(WorkRating, 0) + ISNULL(BehaviourRating, 0) + ISNULL(PunctualityRating, 0))/3.0)'
+          ),
+        })
+        .first();
 
       results.push({
-        HelperMobileNo: helperMobile,
+        HelperMobileNo: helper.HelperMobileNo,
         HelperName: helper.HelperName,
         HelperLanguageSpeak: helper.HelperLanguageSpeak,
         HelperImage: helper.HelperImage,
         KycVerified: helper.KycVerified,
+        HelperRating: Number(avgRatingRow?.avg?.toFixed(1)) || 0,
+        userOrderCount: Number(userOrderCount?.count) || 0,
         availableTimings,
-        HelperRating: totalAverageValue,
-        userOrderCount: userOrderCount?.count ?? 0,
       });
     }
 
-    res.json({
-      message: 'Helpers with available slots fetched successfully',
-      results
-    });
+    successResponse(res, 'Suggested helpers fetched successfully.', results);
   } catch (error) {
-    console.error('Error in getHelpersWithAvailableSlots:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ getSuggestedHelpers Error:', error);
+    errorResponse(res, 'Failed to fetch suggested helpers', 500, 'Internal Server Error');
   }
 };
-
