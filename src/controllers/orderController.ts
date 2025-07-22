@@ -11,14 +11,13 @@ const generateBookingId = (): string => {
 export const bookingOrderNew = async (req: Request, res: Response): Promise<void> => {
   const data = req.body;
 
-  if (!data || !data.OrderBy || !data.responseDates || !data.Itemsid) {
+  if (!data || !data.OrderBy || !Array.isArray(data.responseDates) || !data.Itemsid) {
     errorResponse(res, 'Missing required fields', 400);
     return;
   }
 
   const trx = await db.transaction();
   try {
-    // Generate new transaction number
     const lastTrans = await trx('OrderBookingTable').orderBy('TransactionNo', 'desc').first();
     const transactionNo = lastTrans ? lastTrans.TransactionNo + 1 : 1;
 
@@ -28,56 +27,68 @@ export const bookingOrderNew = async (req: Request, res: Response): Promise<void
       return errorResponse(res, 'User not found', 404);
     }
 
-    const bookingId = generateBookingId();
-    const jobDate = data.responseDates[0]?.job_date || null;
-    const jobTime = data.responseDates[0]?.job_time || null;
+    const bookings = [];
 
-    const helperGetAmount = parseFloat(data.ItemsAmount) - parseFloat(data.AppliedTaxAmount);
-    let helperGetWithoutDiscount = 0;
+    for (const entry of data.responseDates) {
+      const bookingId = generateBookingId();
+      const jobDate = entry.job_date;
+      const jobTime = entry.job_time;
+      const helperName = entry.UserName || data.UserName;
 
-    if (data.ItemsAmountWithoutDiscount) {
-      helperGetWithoutDiscount = parseFloat(data.ItemsAmountWithoutDiscount) - parseFloat(data.YufyConvWithoutDiscount);
+      const helperGetAmount = parseFloat(data.ItemsAmount) - parseFloat(data.AppliedTaxAmount);
+      let helperGetWithoutDiscount = 0;
+
+      if (data.ItemsAmountWithoutDiscount) {
+        helperGetWithoutDiscount = parseFloat(data.ItemsAmountWithoutDiscount) - parseFloat(data.YufyConvWithoutDiscount);
+      }
+
+      await trx('OrderBookingTable').insert({
+        Itemsid: data.Itemsid[0],
+        BookingId: bookingId,
+        ItemsAmountWithoutDiscount: parseFloat(data.ItemsAmountWithoutDiscount).toFixed(2),
+        ItemsAmount: parseFloat(data.ItemsAmount).toFixed(2),
+        ItemCreatedDate: new Date(),
+        ItemModifiedDate: new Date(),
+        ConvenienceFee: parseFloat(data.ConvenienceFee).toFixed(2),
+        GstTax: parseFloat(data.GstTax).toFixed(2),
+        OrderBy: data.OrderBy,
+        UserName: helperName,
+        OrderGenratedLat: data.OrderGenratedLat,
+        OrderGenratedLong: data.OrderGenratedLong,
+        ClothItem: data.ClothItem,
+        CookingPerson: data.CookingPerson,
+        CookingPeriods: data.CookingPeriods,
+        VegitableChopping: data.VegitableChopping,
+        CookingItem: data.CookingItem,
+        BathroomCount: data.BathroomCount,
+        AddonsMapped: data.AddonsMapped,
+        useraddress: data.useraddress,
+        Housetype: data.Housetype,
+        OrderStatus: 'Pending',
+        languages: data.languages,
+        Gender: data.Gender,
+        responseDates: jobDate,
+        responseTime: jobTime,
+        ItemTotalAmount: parseFloat(data.ItemTotalAmount).toFixed(2),
+        YufyConvWithoutDiscount: parseFloat(data.YufyConvWithoutDiscount).toFixed(2),
+        AppliedTaxAmount: parseFloat(data.AppliedTaxAmount).toFixed(2),
+        AmountHelperGet: helperGetAmount.toFixed(2),
+        AmountHelperGetWithoutDiscount: helperGetWithoutDiscount.toFixed(2),
+        TotalDiscount: parseFloat(data.TotalDiscount).toFixed(2),
+        offerAmount: data.offerAmount,
+        offerDays: data.offerDays,
+        favouriteHelpers: JSON.stringify(data.favouriteHelpers),
+        TransactionNo: transactionNo,
+        RazorpayOrderid: data.RazorpayOrderid,
+      });
+
+      bookings.push({
+        bookingId,
+        job_date: jobDate,
+        job_time: jobTime,
+        helperId: entry.HelperId,
+      });
     }
-
-    await trx('OrderBookingTable').insert({
-      Itemsid: data.Itemsid[0],
-      BookingId: bookingId,
-      ItemsAmountWithoutDiscount: parseFloat(data.ItemsAmountWithoutDiscount).toFixed(2),
-      ItemsAmount: parseFloat(data.ItemsAmount).toFixed(2),
-      ItemCreatedDate: new Date(),
-      ItemModifiedDate: new Date(),
-      ConvenienceFee: parseFloat(data.ConvenienceFee).toFixed(2),
-      GstTax: parseFloat(data.GstTax).toFixed(2),
-      OrderBy: data.OrderBy,
-      UserName: data.UserName,
-      OrderGenratedLat: data.OrderGenratedLat,
-      OrderGenratedLong: data.OrderGenratedLong,
-      ClothItem: data.ClothItem,
-      CookingPerson: data.CookingPerson,
-      CookingPeriods: data.CookingPeriods,
-      VegitableChopping: data.VegitableChopping,
-      CookingItem: data.CookingItem,
-      BathroomCount: data.BathroomCount,
-      AddonsMapped: data.AddonsMapped,
-      useraddress: data.useraddress,
-      Housetype: data.Housetype,
-      OrderStatus: 'Pending',
-      languages: data.languages,
-      Gender: data.Gender,
-      responseDates: jobDate,
-      responseTime: jobTime,
-      ItemTotalAmount: parseFloat(data.ItemTotalAmount).toFixed(2),
-      YufyConvWithoutDiscount: parseFloat(data.YufyConvWithoutDiscount).toFixed(2),
-      AppliedTaxAmount: parseFloat(data.AppliedTaxAmount).toFixed(2),
-      AmountHelperGet: helperGetAmount.toFixed(2),
-      AmountHelperGetWithoutDiscount: helperGetWithoutDiscount.toFixed(2),
-      TotalDiscount: parseFloat(data.TotalDiscount).toFixed(2),
-      offerAmount: data.offerAmount,
-      offerDays: data.offerDays,
-      favouriteHelpers: JSON.stringify(data.favouriteHelpers),
-      TransactionNo: transactionNo,
-      RazorpayOrderid: data.RazorpayOrderid,
-    });
 
     await trx('ZufyUserData')
       .where('ContactNumber', data.OrderBy)
@@ -99,19 +110,19 @@ export const bookingOrderNew = async (req: Request, res: Response): Promise<void
     await trx.commit();
     successResponse(res, 'Booking Order Registered Successfully', {
       transactionNo,
-      bookingId,
+      bookings,
     });
   } catch (error) {
     await trx.rollback();
     await db('WebhookLog').insert([
       {
-        Message: (error instanceof Error ? error.message : String(error)),
+        Message: error instanceof Error ? error.message : String(error),
         Date: new Date(),
         PaymentStatus: data.RazorpayOrderid,
         RazorpayOrderid: data.RazorpayOrderid,
       },
       {
-        Message: (error instanceof Error ? error.message : String(error)),
+        Message: error instanceof Error ? error.message : String(error),
         Date: new Date(),
         PaymentStatus: 'BookingOrderNew',
         RazorpayOrderid: 'OrderController',
@@ -122,7 +133,6 @@ export const bookingOrderNew = async (req: Request, res: Response): Promise<void
     errorResponse(res, 'Booking failed: ' + error, 500);
   }
 };
-
 
 export const trackHelperAvailabilityData = async (req: Request, res: Response): Promise<void> => {
   const data = req.body;
@@ -165,9 +175,9 @@ export const trackHelperAvailabilityData = async (req: Request, res: Response): 
       ReleaseDateTime: data.ReleaseDateTime,
       BreakTime: data.BreakTime,
       Duration: data.Duration,
-      WorkStatus: data.WorkStatus,
-      BlockStatus: data.BlockStatus,
-      BlockReason: data.BlockReason,
+      WorkStatus: "Assigned",
+      BlockStatus: "Work",
+      BlockReason: "Blocked",
       created_at: new Date(),
       is_processed: '0',
     });
@@ -183,5 +193,121 @@ export const trackHelperAvailabilityData = async (req: Request, res: Response): 
     });
 
     errorResponse(res, 'Failed to track helper availability', 500);
+  }
+};
+
+
+export const updateBookingOrderPaysuccess = async (req: Request, res: Response): Promise<void> => {
+  const data = req.body;
+
+  if (!data || !data.OrderBy || !data.BookingId || !data.ItemTotalAmount) {
+    errorResponse(res, 'Missing required fields: OrderBy, BookingId, or ItemTotalAmount', 400);
+    return;
+  }
+
+  const bookingIds = data.BookingId.split(',');
+  let totalBlockAmount = 0;
+
+  try {
+    for (const bookingId of bookingIds) {
+      const order = await db('OrderBookingTable')
+        .where({ BookingId: bookingId })
+        .andWhere(function () {
+          this.whereNull('RazorpayPaymentid').orWhere('RazorpayPaymentid', '');
+        })
+        .first();
+
+      if (!order) continue;
+
+      await db('OrderBookingTable')
+        .where({ BookingId: bookingId })
+        .update({
+          RazorpayPaymentid: data.RazorpayPaymentid,
+        });
+
+      totalBlockAmount += parseFloat(data.ItemTotalAmount);
+    }
+
+    // Wallet update logic
+    if (!data.RazorpayOrderid && data.walletfromamount === true) {
+      const wallet = await db('UserWallets')
+        .where({ UserMobileNo: data.OrderBy })
+        .first();
+
+      if (wallet) {
+        const currentBlocked = parseFloat(wallet.UserBlockedAmount || '0');
+        const currentBalance = parseFloat(wallet.UserAmountInWallet || '0');
+
+        const newBlocked = currentBlocked + totalBlockAmount;
+        let newBalance = currentBalance;
+
+        if (data.walletfromamount && parseFloat(data.walletbalance) > totalBlockAmount) {
+          newBalance -= totalBlockAmount;
+        } else {
+          newBalance -= parseFloat(data.walletbalance || '0');
+        }
+
+        await db('UserWallets')
+          .where({ UserMobileNo: data.OrderBy })
+          .update({
+            UserBlockedAmount: newBlocked.toFixed(2),
+            UserAmountInWallet: newBalance.toFixed(2),
+          });
+      }
+    } else if (data.RazorpayOrderid) {
+      const transaction = await db('WalletTansaction')
+        .where({ RazorpayOrderid: data.RazorpayOrderid, is_processed: 0 })
+        .first();
+
+      if (transaction) {
+        const wallet = await db('UserWallets')
+          .where({ UserMobileNo: data.OrderBy })
+          .first();
+
+        if (wallet) {
+          const currentBlocked = parseFloat(wallet.UserBlockedAmount || '0');
+          const currentBalance = parseFloat(wallet.UserAmountInWallet || '0');
+
+          const newBlocked = currentBlocked + totalBlockAmount;
+          let newBalance = currentBalance;
+
+          if (transaction.walletfromamount && parseFloat(transaction.walletbalance) > totalBlockAmount) {
+            newBalance -= totalBlockAmount;
+          } else {
+            newBalance -= parseFloat(transaction.walletbalance || '0');
+          }
+
+          await db('UserWallets')
+            .where({ UserMobileNo: data.OrderBy })
+            .update({
+              UserBlockedAmount: newBlocked.toFixed(2),
+              UserAmountInWallet: newBalance.toFixed(2),
+            });
+
+          await db('WalletTansaction')
+            .where({ RazorpayOrderid: data.RazorpayOrderid })
+            .update({ is_processed: 1 });
+        }
+      }
+    }
+
+    await db('WebhookLog').insert({
+      Message: 'Updated booking payment success',
+      Date: new Date(),
+      PaymentStatus: data.RazorpayOrderid || 'WalletUsed',
+      RazorpayOrderid: 'OrderController',
+    });
+
+    successResponse(res, 'Booking Order Register Successfully');
+  } catch (error) {
+    console.error('Error in updateBookingOrderPaysuccess:', error);
+    await db('WebhookLog').insert({
+      Message: error instanceof Error ? error.message : String(error),
+      Date: new Date(),
+      PaymentStatus: 'UpdateBookingOrderPaysuccess',
+      RazorpayOrderid: 'OrderController',
+    });
+
+    errorResponse(res, 'Booking payment update failed', 500);
   }
 };
