@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import db from '../config/db';
 import { DateTime } from 'luxon';
 import { errorResponse, successResponse } from '../utilities/responseWrapper';
+import { checkAddonsCount, getJobTitle } from '../utilities/commonMethords';
 
 // Booking ID Generator
 const generateBookingId = (): string => {
@@ -196,7 +197,6 @@ export const trackHelperAvailabilityData = async (req: Request, res: Response): 
   }
 };
 
-
 export const updateBookingOrderPaysuccess = async (req: Request, res: Response): Promise<void> => {
   const data = req.body;
 
@@ -309,5 +309,187 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
     });
 
     errorResponse(res, 'Booking payment update failed', 500);
+  }
+};
+
+export const getUpcomingBookingOrder = async (req: Request, res: Response): Promise<void> => {
+  const { OrderBy } = req.body;
+
+  if (!OrderBy) {
+    errorResponse(res, 'OrderBy is required', 400);
+    return;
+  }
+
+  try {
+    const user = await db('ZufyUserData').where({ ContactNumber: OrderBy }).first();
+    if (!user) {
+      return successResponse(res, 'No user found', []);
+    }
+
+    const rawResult = await db.raw(`
+      SELECT BookingId as OrderId, Itemsid, ISNULL(OrderAcceptedBy, '') as OrderSendedTo, OrderBy,
+        OrderStatus, ItemTotalAmount as OrderAmount, responseDates as OrderDate, responseTime as OrderTime,
+        '' as OrderFrom, ISNULL(AddonsMapped, '') as AddonsMapped, ISNULL(MonthlyHelps, 0) as MonthlyHelps, TotalDiscount
+      FROM OrderBookingTable
+      WHERE OrderBy = ? AND (OrderStatus IN ('Assigned', 'Accepted', 'Active'))
+      ORDER BY CAST(CONCAT(SUBSTRING(responseDates, 4, 2), '-', SUBSTRING(responseDates, 1, 2), '-', SUBSTRING(responseDates, 7, 4), ' ', responseTime) AS NVARCHAR) ASC
+    `, [OrderBy]);
+
+    const rows = Array.isArray(rawResult[0]) ? rawResult[0] : [rawResult[0]];
+    console.log('Order Rows:', rows);
+
+    const supportContact = await db('OfferSettings').where({ status: 'Support' }).first();
+    const responseArray: any[] = [];
+
+    for (const row of rows) {
+      console.log('Processing Row:----->', row);
+      const jobTitle = await getJobTitle(row.Itemsid);
+      const AddonsCounts = checkAddonsCount(row.AddonsMapped);
+
+      const orderData: any = {
+        OrderId: row.OrderId,
+        Jobtitile: jobTitle,
+        OrderStatus: row.OrderStatus,
+        OrderAmount: row.OrderAmount,
+        OrderDate: row.OrderDate,
+        OrderTime: row.OrderTime,
+        addonscounts: AddonsCounts,
+        SupportContact: supportContact?.supportedperson || '',
+        MonthlyHelps: row.MonthlyHelps,
+        TotalDiscount: row.TotalDiscount
+      };
+
+      if (row.OrderFrom === 'BookLater' || row.OrderFrom === '') {
+        const helper = await db('ZufyHelper').where({ HelperMobileNo: row.OrderSendedTo }).first();
+        if (helper) {
+          orderData.HelperName = helper.HelperName;
+          orderData.HelperImage = helper.HelperImage;
+          orderData.Rating = helper.HelperRating;
+          orderData.KycVerified = helper.KycVerified;
+          orderData.VaccinationCount = helper.VaccineCount;
+          orderData.RateGivenByUser = helper.RateGivenByUser;
+        }
+      } else {
+        orderData.HelperName = 'Yet to be assigned';
+        orderData.HelperImage = '';
+        orderData.Rating = '';
+        orderData.RateGivenByUser = '';
+      }
+
+      responseArray.push(orderData);
+    }
+
+    successResponse(res, 'Upcoming orders fetched', responseArray);
+  } catch (err) {
+    console.error('Error in UpcomingBookingOrder:', err);
+    await db('WebhookLog').insert({
+      Message: err instanceof Error ? err.message : String(err),
+      Date: new Date(),
+      PaymentStatus: 'UpcomingBookingOrder',
+      RazorpayOrderid: 'HelperInfoController'
+    });
+
+    errorResponse(res, 'Internal server error', 500);
+  }
+};
+
+
+export const getAllUserRequests = async (req: Request, res: Response): Promise<void> => {
+  const { OrderBy, page = 1, limit = 10 } = req.body;
+
+  if (!OrderBy) {
+    errorResponse(res, 'OrderBy is required', 400);
+    return;
+  }
+
+  try {
+    const offset = (page - 1) * limit;
+
+    const [userExists, helperExists] = await Promise.all([
+      db('ZufyUserData').where({ ContactNumber: OrderBy }).first(),
+      db('ZufyHelper').where({ HelperMobileNo: OrderBy }).first()
+    ]);
+
+    if (!userExists && !helperExists) {
+      return successResponse(res, 'No data found', { past: [], current: [], pending: [] });
+    }
+
+    const supportContact = await db('OfferSettings').where({ status: 'Support' }).first();
+    const supportNumber = supportContact?.supportedperson ?? '';
+
+    // ⏳ Past Orders (pagination enabled)
+    const pastOrders = await db('OrderToHelper')
+      .where(function () {
+        this.where('OrderBy', OrderBy).orWhere('OrderSendedTo', OrderBy);
+      })
+      .whereIn('OrderStatus', ['Completed', 'Cancelled'])
+      .offset(offset)
+      .limit(limit)
+      .orderBy('UserRequestDate', 'desc');
+
+    // 🔄 Current Orders (Assigned / Accepted / Active)
+    const currentOrders = await db('OrderToHelper')
+      .where(function () {
+        this.where('OrderBy', OrderBy).orWhere('OrderSendedTo', OrderBy);
+      })
+      .whereIn('OrderStatus', ['Accepted', 'Active']);
+
+    // ⏳ Pending Orders (Only where OrderBy is the user)
+    const pendingOrders = await db('OrderToHelper')
+      .where('OrderBy', OrderBy)
+      .where('OrderStatus', 'Pending');
+
+    // 🧩 Format all three
+    const formatOrders = async (orders: any[]) => {
+      const results = [];
+
+      for (const order of orders) {
+        const jobTitle = await getJobTitle(order.OrderItem);
+        const addonsCount = checkAddonsCount(order.AddonsMapped ?? '');
+
+        const helper = await db('ZufyHelper')
+          .where({ HelperMobileNo: order.OrderSendedTo })
+          .first();
+
+        const formatted = {
+          OrderId: order.OrderId,
+          HelperMobileNo: order.OrderSendedTo,
+          HelperName: helper?.HelperName || 'Yet to be assigned',
+          HelperImage: helper?.HelperImage || '',
+          Jobtitile: jobTitle,
+          addonscounts: addonsCount,
+          OrderStatus: order.OrderStatus,
+          OrderAmount: order.TotalAmountOrder || order.OrderAmount,
+          UserRequestDate: `${order.UserRequestDate ?? ''} ${order.UserRequestTime ?? ''}`,
+          Rating: helper?.HelperRating ?? '',
+          RateGivenByUser: helper?.RateGivenByUser ?? '',
+          SupportContact: supportNumber,
+          Favourite: order.Favourite || false,
+          OrderExpire: order.OrderExpire || null
+        };
+
+        results.push(formatted);
+      }
+
+      return results;
+    };
+
+    const [past, current, pending] = await Promise.all([
+      formatOrders(pastOrders),
+      formatOrders(currentOrders),
+      formatOrders(pendingOrders)
+    ]);
+
+    successResponse(res, 'Fetched all user requests', { past, current, pending });
+  } catch (err) {
+    console.error('Error in /user/allRequests:', err);
+    await db('WebhookLog').insert({
+      Message: err instanceof Error ? err.message : String(err),
+      Date: new Date(),
+      PaymentStatus: 'userRequestMerged',
+      RazorpayOrderid: 'userRequestController'
+    });
+
+    errorResponse(res, 'Internal server error', 500);
   }
 };

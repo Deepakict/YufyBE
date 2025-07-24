@@ -103,3 +103,37 @@ export function getAvailableTimings(
     suggested_t2,
   };
 }
+
+export const getJobTitle = async (itemsId: string): Promise<string> => {
+  if (!itemsId) return '';
+
+  const jobIds = itemsId.split(',').map(id => id.trim()).filter(Boolean);
+  if (jobIds.length === 0) return '';
+
+  const jobTitles = await db('JobsTable')
+    .whereIn('JobId', jobIds)
+    .pluck('JobTitle');
+
+  return jobTitles.join(', ');
+};
+
+export const checkAddonsCount = (addonsMapped: string): number => {
+  if (!addonsMapped || addonsMapped === 'undefined') return 0;
+
+  try {
+    const parsed = JSON.parse(addonsMapped);
+    let count = 0;
+
+    for (const jobKey in parsed) {
+      const addons = parsed[jobKey];
+      if (typeof addons === 'object') {
+        count += Object.keys(addons).length;
+      }
+    }
+
+    return count;
+  } catch (err) {
+    console.error('Error parsing AddonsMapped:', err);
+    return 0;
+  }
+};
