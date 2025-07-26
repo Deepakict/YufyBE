@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import db from '../config/db';
-import { DateTime } from 'luxon';
 import { errorResponse, successResponse } from '../utilities/responseWrapper';
 import { checkAddonsCount, getJobTitle } from '../utilities/commonMethords';
+import { v4 as uuidv4 } from 'uuid';
 
 // Booking ID Generator
 const generateBookingId = (): string => {
@@ -205,15 +205,15 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
     return;
   }
 
-  const bookingIds = data.BookingId.split(',');
+  const bookingIds: string[] = data.BookingId.split(',');
   let totalBlockAmount = 0;
 
   try {
     for (const bookingId of bookingIds) {
       const order = await db('OrderBookingTable')
         .where({ BookingId: bookingId })
-        .andWhere(function () {
-          this.whereNull('RazorpayPaymentid').orWhere('RazorpayPaymentid', '');
+        .andWhere((builder: any) => {
+          builder.whereNull('RazorpayPaymentid').orWhere('RazorpayPaymentid', '');
         })
         .first();
 
@@ -221,16 +221,57 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
 
       await db('OrderBookingTable')
         .where({ BookingId: bookingId })
-        .update({
-          RazorpayPaymentid: data.RazorpayPaymentid,
-        });
+        .update({ RazorpayPaymentid: data.RazorpayPaymentid });
 
       totalBlockAmount += parseFloat(data.ItemTotalAmount);
+
+      const user = await db('ZufyUserData').where({ ContactNumber: data.OrderBy }).first();
+      const helperTrack = await db('TrackHelperAvailabiltyData')
+        .where({ BookingId: bookingId, is_processed: '0' })
+        .first();
+
+      const helperName: string = helperTrack?.HelperName || '-';
+
+      const msg = `Scheduled Booking <pre>    </pre>
+<pre>Booking Id: ${bookingId}</pre>
+<pre>    </pre>
+<pre>Name: ${order.UserName}</pre>
+<pre>    </pre>
+<pre>Mobile: ${order.OrderBy}</pre>
+<pre>    </pre>
+<pre>Gender Preference: ${order.Gender}</pre>
+<pre>    </pre>
+<pre>Address: ${order.useraddress}</pre>
+<pre>    </pre>
+<pre>Latitude: ${order.OrderGenratedLat}</pre>
+<pre>    </pre>
+<pre>Longitude: ${order.OrderGenratedLong}</pre>
+<pre>    </pre>
+<pre>House Size: ${order.Housetype}</pre>
+<pre>    </pre>
+<pre>Date: ${order.responseDates}</pre>
+<pre>    </pre>
+<pre>Time: ${order.responseTime}</pre>
+<pre>    </pre>
+<pre>Addons: ${order.AddonsMapped || '-'}</pre>
+<pre>    </pre>
+<pre>Assigned Helper: ${helperName}</pre>
+<pre>    </pre>
+<pre>Convenience: ${parseFloat(order.AppliedTaxAmount).toFixed(2)}</pre>
+<pre>    </pre>
+<pre>User Paid: ${parseFloat(order.ItemsAmount).toFixed(2)}</pre>
+<pre>    </pre>
+<pre>Helper Get: ${parseFloat(order.AmountHelperGet).toFixed(2)}</pre>
+<pre>    </pre>
+<pre>Sequence No: ${order.SequenceNo}</pre>
+<pre>    </pre>
+<pre>Total Discount: ${parseFloat(order.TotalDiscount).toFixed(2)}</pre>`;
+
+      await db.raw('EXEC telegram_order_request ?', [msg]);
     }
 
-    // Wallet update logic
     if (!data.RazorpayOrderid && data.walletfromamount === true) {
-      const wallet = await db('UserWallets')
+      const wallet = await db('UserWallet')
         .where({ UserMobileNo: data.OrderBy })
         .first();
 
@@ -241,13 +282,13 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
         const newBlocked = currentBlocked + totalBlockAmount;
         let newBalance = currentBalance;
 
-        if (data.walletfromamount && parseFloat(data.walletbalance) > totalBlockAmount) {
+        if (parseFloat(data.walletbalance) > totalBlockAmount) {
           newBalance -= totalBlockAmount;
         } else {
           newBalance -= parseFloat(data.walletbalance || '0');
         }
 
-        await db('UserWallets')
+        await db('UserWallet')
           .where({ UserMobileNo: data.OrderBy })
           .update({
             UserBlockedAmount: newBlocked.toFixed(2),
@@ -260,7 +301,7 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
         .first();
 
       if (transaction) {
-        const wallet = await db('UserWallets')
+        const wallet = await db('UserWallet')
           .where({ UserMobileNo: data.OrderBy })
           .first();
 
@@ -277,7 +318,7 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
             newBalance -= parseFloat(transaction.walletbalance || '0');
           }
 
-          await db('UserWallets')
+          await db('UserWallet')
             .where({ UserMobileNo: data.OrderBy })
             .update({
               UserBlockedAmount: newBlocked.toFixed(2),
@@ -299,15 +340,14 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
     });
 
     successResponse(res, 'Booking Order Register Successfully');
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error in updateBookingOrderPaysuccess:', error);
     await db('WebhookLog').insert({
-      Message: error instanceof Error ? error.message : String(error),
+      Message: error.message || String(error),
       Date: new Date(),
       PaymentStatus: 'UpdateBookingOrderPaysuccess',
       RazorpayOrderid: 'OrderController',
     });
-
     errorResponse(res, 'Booking payment update failed', 500);
   }
 };
@@ -393,7 +433,255 @@ export const getUpcomingBookingOrder = async (req: Request, res: Response): Prom
   }
 };
 
+export const assignBookingOrders = async (req: Request, res: Response): Promise<void> => {
+  const value = req.body;
 
+  if (!value || !value.BookingId || !value.favouriteHelpers || !value.responseDates || !value.responseTime || !value.useraddress) {
+    errorResponse(res, 'Missing required fields', 400);
+    return;
+  }
+
+  const trx = await db.transaction();
+  try {
+    await trx('WebhookLog').insert({
+      Message: 'come from webhook AssignBookingOrders',
+      Date: new Date(),
+      PaymentStatus: value.BookingId,
+      RazorpayOrderid: value.BookingId,
+    });
+
+    const helper = await trx('ZufyHelper').where({ HelperMobileNo: value.favouriteHelpers }).first();
+    const orderDetail = await trx('OrderBookingTable').where({ BookingId: value.BookingId }).first();
+
+    if (!orderDetail || !helper) {
+      await trx.rollback();
+      return errorResponse(res, 'Order or helper not found', 404);
+    }
+
+    const userImage = await trx('ZufyUserData').where({ ContactNumber: orderDetail.OrderBy }).first();
+
+    await trx('HelperAvailabiltyTracking').where({ BookingID: value.BookingId }).del();
+
+    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+    const status = 'Assigned';
+    const currentTime = new Date();
+    const expireTime = new Date(currentTime.getTime() + 30 * 60000);
+    const expireSeconds = expireTime.getHours() * 3600 + expireTime.getMinutes() * 60 + expireTime.getSeconds();
+
+    const orderItemTitles = await Promise.all(
+      orderDetail.Itemsid.split(',').map(async (jobId: string) => {
+        const job = await trx('JobsTable').where({ JobId: jobId }).first();
+        return job?.JobTitle || '';
+      })
+    );
+
+    const orderitemstring = orderItemTitles.join(',');
+
+    const orderToHelper = {
+      OrderId: orderDetail.BookingId,
+      UserLat: orderDetail.OrderGenratedLat,
+      UserLong: orderDetail.OrderGenratedLong,
+      OrderBy: orderDetail.OrderBy,
+      OrderSendedTo: value.favouriteHelpers,
+      AppliedTaxOnOrder: orderDetail.AppliedTaxAmount,
+      TotalAmountOrder: orderDetail.ItemTotalAmount,
+      AmountHelperGet: orderDetail.AmountHelperGet,
+      AmountHelperGetWithoutDiscount: orderDetail.AmountHelperGetWithoutDiscount,
+      ItemsAmountWithoutDiscount: orderDetail.ItemsAmountWithoutDiscount,
+      YufyConvWithoutDiscount: orderDetail.YufyConvWithoutDiscount,
+      SequenceNo: orderDetail.SequenceNo,
+      TotalDiscount: orderDetail.TotalDiscount,
+      ConvenienceFee: orderDetail.ConvenienceFee,
+      GstTax: orderDetail.GstTax,
+      OrderAmount: orderDetail.AmountHelperGet,
+      OrderStatus: status,
+      OrderItem: orderDetail.Itemsid,
+      HelperHouse: orderDetail.Housetype,
+      UserName: orderDetail.UserName,
+      UserImage: userImage?.Image || '',
+      UserRequestTime: value.responseTime,
+      UserRequestDate: value.responseDates,
+      OrderExpire: expireSeconds.toString(),
+      OrderCreatedMin: currentTime.getMinutes().toString(),
+      VerficationOtp: otp,
+      HelperCurrentRating: helper.HelperRating,
+      HelperRatingCount: helper.RateGivenByUser,
+      ClothItem: orderDetail.ClothItem,
+      CookingPerson: orderDetail.CookingPerson,
+      BathroomCount: orderDetail.BathroomCount,
+      CookingPeriods: orderDetail.CookingPeriods,
+      VegitableChopping: orderDetail.VegitableChopping,
+      CookingItem: orderDetail.CookingItem,
+      Loads: orderDetail.Loads,
+      UserFeedbackUpdate: 'NotDone',
+      HelperFeedbackUpdate: 'NotDone',
+      TravelPoints: value.TravelPoints || '0',
+      BookingTransaction: orderDetail.OrderItemId,
+      UserLocation: value.useraddress,
+      PermanentAddress: value.useraddress,
+      OrderFrom: 'BookLater',
+      AddonsMapped: orderDetail.AddonsMapped,
+      MonthlyHelps: orderDetail.MonthlyHelps,
+      RazorpayOrderid: orderDetail.RazorpayOrderid || '',
+      RazorpayPaymentid: orderDetail.RazorpayPaymentid || '',
+    };
+
+    await trx('OrderToHelper').insert(orderToHelper);
+
+    await trx('OrderBookingTable')
+      .where({ BookingId: orderDetail.BookingId })
+      .update({
+        OrderTransaction: uuidv4(),
+        responseTime: value.responseTime,
+        responseDates: value.responseDates,
+        OrderAcceptedBy: value.favouriteHelpers,
+        useraddress: value.useraddress,
+        OrderStatus: status,
+      });
+
+    await trx('ZufyUserData')
+      .where({ ContactNumber: orderDetail.OrderBy })
+      .update({ PermanentAddress: value.useraddress });
+
+    await trx.commit();
+
+    successResponse(res, 'Request Send To Helper');
+  } catch (error: any) {
+    await db('WebhookLog').insert({
+      Message: error.message || String(error),
+      Date: new Date(),
+      PaymentStatus: 'AssignBookingOrdersError',
+      RazorpayOrderid: 'OrderController',
+    });
+
+    console.error('AssignBookingOrders error:', error);
+    errorResponse(res, 'Failed to assign booking order', 500);
+  }
+};
+
+export const updateHelperAvailabilityDefault = async (req: Request, res: Response): Promise<void> => {
+  const data = req.body;
+
+  if (!data || !data.BookingID || !data.HelperMobileNo || !data.HelperName || !data.BreakTime || !data.Duration) {
+    errorResponse(res, 'Missing required fields', 400);
+    return;
+  }
+
+  const trx = await db.transaction();
+
+  try {
+    // Webhook log
+    await trx('WebhookLog').insert({
+      Message: 'default update TrackHelperAvailability',
+      Date: new Date(),
+      PaymentStatus: data.BookingID,
+      RazorpayOrderid: data.BookingID,
+    });
+
+    // Confirm booking exists
+    const booking = await trx('OrderBookingTable').where({ BookingId: data.BookingID }).first();
+    if (!booking) {
+      await trx.rollback();
+      return errorResponse(res, 'Booking ID not found', 404);
+    }
+
+    // Clear old availability
+    await trx('HelperAvailabiltyTracking').where({ BookingID: data.BookingID }).del();
+
+    // Insert default availability
+    await trx('HelperAvailabiltyTracking').insert({
+      HelperMobileNo: data.HelperMobileNo,
+      HelperName: data.HelperName,
+      BookingID: data.BookingID,
+      BreakTime: data.BreakTime,
+      Duration: data.Duration,
+      WorkStatus: 'Assigned',
+      BlockReason: 'Work',
+      BlockStatus: 'Blocked',
+      BlockedDateTime: data.BlockedDateTime || new Date(),
+      ReleaseDateTime: data.ReleaseDateTime || null,
+    });
+
+    await trx.commit();
+    successResponse(res, 'Helper availability updated with default values');
+  } catch (error: any) {
+    await trx.rollback();
+
+    await db('WebhookLog').insert({
+      Message: error.message || String(error),
+      Date: new Date(),
+      PaymentStatus: 'DefaultTrackHelperError',
+      RazorpayOrderid: 'OrderController',
+    });
+
+    console.error('updateHelperAvailabilityDefault error:', error);
+    errorResponse(res, 'Default update failed', 500);
+  }
+};
+
+export const trackHelperAvailability = async (req: Request, res: Response): Promise<void> => {
+  const data = req.body;
+
+  if (!data || !data.BookingID || !data.HelperMobileNo || !data.HelperName || !data.BreakTime || !data.Duration || !data.BlockedDateTime || !data.ReleaseDateTime) {
+    errorResponse(res, 'Missing required fields', 400);
+    return;
+  }
+
+  const trx = await db.transaction();
+  try {
+    await trx('WebhookLog').insert({
+      Message: 'come from webhook TrackHelperAvailabilty',
+      Date: new Date(),
+      PaymentStatus: data.BookingID,
+      RazorpayOrderid: data.BookingID,
+    });
+
+    const order = await trx('OrderBookingTable').where({ BookingId: data.BookingID }).first();
+
+    if (!order) {
+      await trx.rollback();
+      return errorResponse(res, 'Booking ID not found', 404);
+    }
+
+    await trx('HelperAvailabiltyTracking').where({ BookingID: data.BookingID }).del();
+
+    await trx('HelperAvailabiltyTracking').insert({
+      HelperMobileNo: data.HelperMobileNo,
+      HelperName: data.HelperName,
+      BookingID: data.BookingID,
+      Duration: data.Duration,
+      BlockedDateTime: data.BlockedDateTime,
+      ReleaseDateTime: data.ReleaseDateTime,
+      BreakTime: data.BreakTime,
+      WorkStatus: 'Assigned',
+      BlockStatus: 'Blocked',
+      BlockReason: 'Work',
+    });
+
+    await trx.commit();
+    successResponse(res, 'Helper availability updated with default values');
+  } catch (error: any) {
+    await trx.rollback();
+
+    await db('WebhookLog').insert({
+      Message: error.message || String(error),
+      Date: new Date(),
+      PaymentStatus: 'TrackHelperAvailability',
+      RazorpayOrderid: 'OrderController',
+    });
+
+    console.error('trackHelperAvailability error:', error);
+    errorResponse(res, 'Failed to insert helper availability', 500);
+  }
+};
+
+// http://localhost:3000/api/order/allRequests
+// {
+//   "OrderBy": "8800391895",
+//   "page": 1,
+//   "limit": 10
+// }
 export const getAllUserRequests = async (req: Request, res: Response): Promise<void> => {
   const { OrderBy, page = 1, limit = 10 } = req.body;
 
@@ -491,5 +779,54 @@ export const getAllUserRequests = async (req: Request, res: Response): Promise<v
     });
 
     errorResponse(res, 'Internal server error', 500);
+  }
+};
+
+// {
+//   "OrderBy": "8800391895",
+//   "OrderId": "BOOK-1753338447430",
+//   "OrderSendedTo": "9876543210"
+// }
+export const cancelPendingOrderByUser = async (req: Request, res: Response): Promise<void> => {
+  const { OrderBy, OrderId, OrderSendedTo } = req.body;
+
+  if (!OrderBy || !OrderId || !OrderSendedTo) {
+    errorResponse(res, 'Missing required fields', 400);
+    return;
+  }
+
+  try {
+    const order = await db('OrderToHelper')
+      .where({ OrderBy, OrderId, OrderSendedTo })
+      .first();
+
+    if (!order) {
+      successResponse(res, 'NoPendingOrderIsPresent', null);
+      return;
+    }
+
+    const now = new Date();
+    const Helperdate = now.toLocaleDateString('en-GB'); // dd-MM-yyyy
+    const Helpertime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }); // hh:mm AM/PM
+
+    await db('OrderToHelper')
+      .where({ OrderId })
+      .update({
+        OrderStatus: 'Pending Request Cancelled By User',
+        UserRequestDate: Helperdate,
+        UserRequestTime: Helpertime
+      });
+
+    successResponse(res, 'cancelPendingorderbyuser', null);
+  } catch (err) {
+    console.error('CancelPendingOrder Error:', err);
+    await db('WebhookLog').insert({
+      Message: err instanceof Error ? err.message : String(err),
+      Date: new Date(),
+      PaymentStatus: 'CancelPendingOrderByUser',
+      RazorpayOrderid: 'HelperInfoController'
+    });
+
+    errorResponse(res, 'Something went wrong while cancelling order', 500);
   }
 };
