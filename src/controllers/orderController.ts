@@ -3,6 +3,7 @@ import db from '../config/db';
 import { errorResponse, successResponse } from '../utilities/responseWrapper';
 import { checkAddonsCount, getJobTitle } from '../utilities/commonMethords';
 import { v4 as uuidv4 } from 'uuid';
+import moment from 'moment';
 
 // Booking ID Generator
 const generateBookingId = (): string => {
@@ -132,68 +133,6 @@ export const bookingOrderNew = async (req: Request, res: Response): Promise<void
 
     console.error('Booking order error:', error);
     errorResponse(res, 'Booking failed: ' + error, 500);
-  }
-};
-
-export const trackHelperAvailabilityData = async (req: Request, res: Response): Promise<void> => {
-  const data = req.body;
-
-  const requiredFields = [
-    'HelperMobileNo',
-    'HelperName',
-    'BookingID',
-    'BlockedDateTime',
-    'ReleaseDateTime',
-    'BreakTime',
-    'Duration',
-    'WorkStatus',
-    'BlockReason',
-    'BlockStatus'
-  ];
-
-  const missingFields = requiredFields.filter((field) => !data[field]);
-
-  if (missingFields.length > 0) {
-    errorResponse(res, `Missing required fields: ${missingFields.join(', ')}`, 400);
-    return;
-  }
-
-  try {
-    // Log activity in WebhookLog
-    await db('WebhookLog').insert({
-      Message: 'Details added in TrackHelperAvailabiltyData',
-      Date: new Date(),
-      PaymentStatus: data.BlockedDateTime,
-      RazorpayOrderid: data.Duration,
-    });
-
-    // Insert helper tracking record (store all as strings for TEXT columns)
-    await db('TrackHelperAvailabiltyData').insert({
-      HelperMobileNo: data.HelperMobileNo,
-      HelperName: data.HelperName,
-      BookingId: data.BookingID,
-      BlockedDateTime: data.BlockedDateTime,
-      ReleaseDateTime: data.ReleaseDateTime,
-      BreakTime: data.BreakTime,
-      Duration: data.Duration,
-      WorkStatus: "Assigned",
-      BlockStatus: "Work",
-      BlockReason: "Blocked",
-      created_at: new Date(),
-      is_processed: '0',
-    });
-
-    successResponse(res, 'Success');
-  } catch (error) {
-    console.error('Error in trackHelperAvailabilityData:', error);
-    await db('WebhookLog').insert({
-      Message: error instanceof Error ? error.message : String(error),
-      Date: new Date(),
-      PaymentStatus: 'TrackHelperAvailabilityData',
-      RazorpayOrderid: 'OrderController',
-    });
-
-    errorResponse(res, 'Failed to track helper availability', 500);
   }
 };
 
@@ -352,87 +291,6 @@ export const updateBookingOrderPaysuccess = async (req: Request, res: Response):
   }
 };
 
-export const getUpcomingBookingOrder = async (req: Request, res: Response): Promise<void> => {
-  const { OrderBy } = req.body;
-
-  if (!OrderBy) {
-    errorResponse(res, 'OrderBy is required', 400);
-    return;
-  }
-
-  try {
-    const user = await db('ZufyUserData').where({ ContactNumber: OrderBy }).first();
-    if (!user) {
-      return successResponse(res, 'No user found', []);
-    }
-
-    const rawResult = await db.raw(`
-      SELECT BookingId as OrderId, Itemsid, ISNULL(OrderAcceptedBy, '') as OrderSendedTo, OrderBy,
-        OrderStatus, ItemTotalAmount as OrderAmount, responseDates as OrderDate, responseTime as OrderTime,
-        '' as OrderFrom, ISNULL(AddonsMapped, '') as AddonsMapped, ISNULL(MonthlyHelps, 0) as MonthlyHelps, TotalDiscount
-      FROM OrderBookingTable
-      WHERE OrderBy = ? AND (OrderStatus IN ('Assigned', 'Accepted', 'Active'))
-      ORDER BY CAST(CONCAT(SUBSTRING(responseDates, 4, 2), '-', SUBSTRING(responseDates, 1, 2), '-', SUBSTRING(responseDates, 7, 4), ' ', responseTime) AS NVARCHAR) ASC
-    `, [OrderBy]);
-
-    const rows = Array.isArray(rawResult[0]) ? rawResult[0] : [rawResult[0]];
-    console.log('Order Rows:', rows);
-
-    const supportContact = await db('OfferSettings').where({ status: 'Support' }).first();
-    const responseArray: any[] = [];
-
-    for (const row of rows) {
-      console.log('Processing Row:----->', row);
-      const jobTitle = await getJobTitle(row.Itemsid);
-      const AddonsCounts = checkAddonsCount(row.AddonsMapped);
-
-      const orderData: any = {
-        OrderId: row.OrderId,
-        Jobtitile: jobTitle,
-        OrderStatus: row.OrderStatus,
-        OrderAmount: row.OrderAmount,
-        OrderDate: row.OrderDate,
-        OrderTime: row.OrderTime,
-        addonscounts: AddonsCounts,
-        SupportContact: supportContact?.supportedperson || '',
-        MonthlyHelps: row.MonthlyHelps,
-        TotalDiscount: row.TotalDiscount
-      };
-
-      if (row.OrderFrom === 'BookLater' || row.OrderFrom === '') {
-        const helper = await db('ZufyHelper').where({ HelperMobileNo: row.OrderSendedTo }).first();
-        if (helper) {
-          orderData.HelperName = helper.HelperName;
-          orderData.HelperImage = helper.HelperImage;
-          orderData.Rating = helper.HelperRating;
-          orderData.KycVerified = helper.KycVerified;
-          orderData.VaccinationCount = helper.VaccineCount;
-          orderData.RateGivenByUser = helper.RateGivenByUser;
-        }
-      } else {
-        orderData.HelperName = 'Yet to be assigned';
-        orderData.HelperImage = '';
-        orderData.Rating = '';
-        orderData.RateGivenByUser = '';
-      }
-
-      responseArray.push(orderData);
-    }
-
-    successResponse(res, 'Upcoming orders fetched', responseArray);
-  } catch (err) {
-    console.error('Error in UpcomingBookingOrder:', err);
-    await db('WebhookLog').insert({
-      Message: err instanceof Error ? err.message : String(err),
-      Date: new Date(),
-      PaymentStatus: 'UpcomingBookingOrder',
-      RazorpayOrderid: 'HelperInfoController'
-    });
-
-    errorResponse(res, 'Internal server error', 500);
-  }
-};
-
 export const assignBookingOrders = async (req: Request, res: Response): Promise<void> => {
   const value = req.body;
 
@@ -560,66 +418,6 @@ export const assignBookingOrders = async (req: Request, res: Response): Promise<
   }
 };
 
-export const updateHelperAvailabilityDefault = async (req: Request, res: Response): Promise<void> => {
-  const data = req.body;
-
-  if (!data || !data.BookingID || !data.HelperMobileNo || !data.HelperName || !data.BreakTime || !data.Duration) {
-    errorResponse(res, 'Missing required fields', 400);
-    return;
-  }
-
-  const trx = await db.transaction();
-
-  try {
-    // Webhook log
-    await trx('WebhookLog').insert({
-      Message: 'default update TrackHelperAvailability',
-      Date: new Date(),
-      PaymentStatus: data.BookingID,
-      RazorpayOrderid: data.BookingID,
-    });
-
-    // Confirm booking exists
-    const booking = await trx('OrderBookingTable').where({ BookingId: data.BookingID }).first();
-    if (!booking) {
-      await trx.rollback();
-      return errorResponse(res, 'Booking ID not found', 404);
-    }
-
-    // Clear old availability
-    await trx('HelperAvailabiltyTracking').where({ BookingID: data.BookingID }).del();
-
-    // Insert default availability
-    await trx('HelperAvailabiltyTracking').insert({
-      HelperMobileNo: data.HelperMobileNo,
-      HelperName: data.HelperName,
-      BookingID: data.BookingID,
-      BreakTime: data.BreakTime,
-      Duration: data.Duration,
-      WorkStatus: 'Assigned',
-      BlockReason: 'Work',
-      BlockStatus: 'Blocked',
-      BlockedDateTime: data.BlockedDateTime || new Date(),
-      ReleaseDateTime: data.ReleaseDateTime || null,
-    });
-
-    await trx.commit();
-    successResponse(res, 'Helper availability updated with default values');
-  } catch (error: any) {
-    await trx.rollback();
-
-    await db('WebhookLog').insert({
-      Message: error.message || String(error),
-      Date: new Date(),
-      PaymentStatus: 'DefaultTrackHelperError',
-      RazorpayOrderid: 'OrderController',
-    });
-
-    console.error('updateHelperAvailabilityDefault error:', error);
-    errorResponse(res, 'Default update failed', 500);
-  }
-};
-
 export const trackHelperAvailability = async (req: Request, res: Response): Promise<void> => {
   const data = req.body;
 
@@ -673,6 +471,88 @@ export const trackHelperAvailability = async (req: Request, res: Response): Prom
 
     console.error('trackHelperAvailability error:', error);
     errorResponse(res, 'Failed to insert helper availability', 500);
+  }
+};
+
+export const getUpcomingBookingOrder = async (req: Request, res: Response): Promise<void> => {
+  const { OrderBy } = req.body;
+
+  if (!OrderBy) {
+    errorResponse(res, 'OrderBy is required', 400);
+    return;
+  }
+
+  try {
+    const user = await db('ZufyUserData').where({ ContactNumber: OrderBy }).first();
+    if (!user) {
+      return successResponse(res, 'No user found', []);
+    }
+
+    const rawResult = await db.raw(`
+      SELECT BookingId as OrderId, Itemsid, ISNULL(OrderAcceptedBy, '') as OrderSendedTo, OrderBy,
+        OrderStatus, ItemTotalAmount as OrderAmount, responseDates as OrderDate, responseTime as OrderTime,
+        '' as OrderFrom, ISNULL(AddonsMapped, '') as AddonsMapped, ISNULL(MonthlyHelps, 0) as MonthlyHelps, TotalDiscount
+      FROM OrderBookingTable
+      WHERE OrderBy = ? AND (OrderStatus IN ('Assigned', 'Accepted', 'Active'))
+      ORDER BY CAST(CONCAT(SUBSTRING(responseDates, 4, 2), '-', SUBSTRING(responseDates, 1, 2), '-', SUBSTRING(responseDates, 7, 4), ' ', responseTime) AS NVARCHAR) ASC
+    `, [OrderBy]);
+
+    const rows = Array.isArray(rawResult[0]) ? rawResult[0] : [rawResult[0]];
+    console.log('Order Rows:', rows);
+
+    const supportContact = await db('OfferSettings').where({ status: 'Support' }).first();
+    const responseArray: any[] = [];
+      console.log('Processing Row:----->', rows);
+
+    for (const row of rows) {
+      console.log('Processing Row:----->', row);
+      const jobTitle = await getJobTitle(row.Itemsid);
+      const AddonsCounts = checkAddonsCount(row.AddonsMapped);
+
+      const orderData: any = {
+        OrderId: row.OrderId,
+        Jobtitile: jobTitle,
+        OrderStatus: row.OrderStatus,
+        OrderAmount: row.OrderAmount,
+        OrderDate: row.OrderDate,
+        OrderTime: row.OrderTime,
+        addonscounts: AddonsCounts,
+        SupportContact: supportContact?.supportedperson || '',
+        MonthlyHelps: row.MonthlyHelps,
+        TotalDiscount: row.TotalDiscount
+      };
+
+      if (row.OrderFrom === 'BookLater' || row.OrderFrom === '') {
+        const helper = await db('ZufyHelper').where({ HelperMobileNo: row.OrderSendedTo }).first();
+        if (helper) {
+          orderData.HelperName = helper.HelperName;
+          orderData.HelperImage = helper.HelperImage;
+          orderData.Rating = helper.HelperRating;
+          orderData.KycVerified = helper.KycVerified;
+          orderData.VaccinationCount = helper.VaccineCount;
+          orderData.RateGivenByUser = helper.RateGivenByUser;
+        }
+      } else {
+        orderData.HelperName = 'Yet to be assigned';
+        orderData.HelperImage = '';
+        orderData.Rating = '';
+        orderData.RateGivenByUser = '';
+      }
+
+      responseArray.push(orderData);
+    }
+
+    successResponse(res, 'Upcoming orders fetched', responseArray);
+  } catch (err) {
+    console.error('Error in UpcomingBookingOrder:', err);
+    await db('WebhookLog').insert({
+      Message: err instanceof Error ? err.message : String(err),
+      Date: new Date(),
+      PaymentStatus: 'UpcomingBookingOrder',
+      RazorpayOrderid: 'HelperInfoController'
+    });
+
+    errorResponse(res, 'Internal server error', 500);
   }
 };
 
@@ -828,5 +708,209 @@ export const cancelPendingOrderByUser = async (req: Request, res: Response): Pro
     });
 
     errorResponse(res, 'Something went wrong while cancelling order', 500);
+  }
+};
+
+
+export const bookingFlowCombined = async (req: Request, res: Response): Promise<void> => {
+  const data = req.body;
+
+  if (!data || !data.OrderBy || !Array.isArray(data.responseDates) || !data.Itemsid) {
+    errorResponse(res, 'Missing required fields', 400);
+    return;
+  }
+
+  const trx = await db.transaction();
+  try {
+    console.log('🔁 Booking Flow Started');
+    const lastTrans = await trx('OrderBookingTable').orderBy('TransactionNo', 'desc').first();
+    const transactionNo = lastTrans ? lastTrans.TransactionNo + 1 : 1;
+    console.log('✅ Transaction Number:', transactionNo);
+
+    const user = await trx('ZufyUserData').where('ContactNumber', data.OrderBy).first();
+    if (!user) throw new Error('User not found');
+
+    const bookings = [];
+
+    for (const entry of data.responseDates) {
+      const bookingId = uuidv4();
+      const jobDate = entry.job_date;
+      const jobTime = entry.job_time;
+
+      console.log(`📝 Creating Booking: ${bookingId} for ${jobDate} ${jobTime}`);
+
+      await trx('OrderBookingTable').insert({
+        BookingId: bookingId,
+        Itemsid: data.Itemsid[0],
+        OrderBy: data.OrderBy,
+        UserName: entry.HelperName || data.UserName,
+        responseDates: jobDate,
+        responseTime: jobTime,
+        ItemTotalAmount: parseFloat(data.ItemTotalAmount),
+        ItemsAmount: parseFloat(data.ItemsAmount),
+        ItemsAmountWithoutDiscount: parseFloat(data.ItemsAmountWithoutDiscount),
+        AppliedTaxAmount: parseFloat(data.AppliedTaxAmount),
+        ConvenienceFee: parseFloat(data.ConvenienceFee),
+        YufyConvWithoutDiscount: parseFloat(data.YufyConvWithoutDiscount),
+        AmountHelperGet: parseFloat(data.ItemsAmount) - parseFloat(data.AppliedTaxAmount),
+        AmountHelperGetWithoutDiscount: parseFloat(data.ItemsAmountWithoutDiscount) - parseFloat(data.YufyConvWithoutDiscount),
+        TotalDiscount: parseFloat(data.TotalDiscount),
+        RazorpayOrderid: data.RazorpayOrderid,
+        TransactionNo: transactionNo,
+        OrderStatus: 'Pending',
+        useraddress: data.useraddress,
+        OrderGenratedLat: data.OrderGenratedLat,
+        OrderGenratedLong: data.OrderGenratedLong,
+        Gender: data.Gender,
+        languages: data.languages,
+        Housetype: data.Housetype,
+        AddonsMapped: data.AddonsMapped,
+        ClothItem: data.ClothItem,
+        CookingPerson: data.CookingPerson,
+        CookingPeriods: data.CookingPeriods,
+        CookingItem: data.CookingItem,
+        BathroomCount: data.BathroomCount,
+        offerAmount: data.offerAmount,
+        offerDays: data.offerDays,
+        MonthlyHelps: data.MonthlyHelps || null,
+        favouriteHelpers: JSON.stringify(data.favouriteHelpers),
+      });
+
+      bookings.push({
+        bookingId,
+        job_date: jobDate,
+        job_time: jobTime,
+        helperId: entry.HelperId,
+        duration: entry.Duration
+      });
+    }
+
+    console.log('🛠️ Updating user profile');
+    await trx('ZufyUserData').where({ ContactNumber: data.OrderBy }).update({
+      Languages: data.languages,
+      Gender: data.Gender,
+      PermanentAddress: data.useraddress,
+    });
+
+    console.log('💸 Inserting Wallet Transaction');
+    await trx('WalletTansaction').insert({
+      RazorpayOrderid: data.RazorpayOrderid,
+      walletfromamount: parseFloat(data.walletfromamount),
+      walletbalance: parseFloat(data.walletbalance),
+      amounttobepaid: parseFloat(data.amounttobepaid),
+      created_at: new Date(),
+      is_processed: 0,
+    });
+
+    let totalBlockAmount = parseFloat(data.ItemTotalAmount);
+    const wallet = await trx('UserWallet').where({ UserMobileNo: data.OrderBy }).first();
+    if (!wallet) throw new Error('User wallet not found');
+
+    console.log('🔐 Updating wallet balance & block');
+    const currentBlocked = parseFloat(wallet.UserBlockedAmount || '0');
+    const currentBalance = parseFloat(wallet.UserAmountInWallet || '0');
+    const newBlocked = currentBlocked + totalBlockAmount;
+    let newBalance = currentBalance;
+
+    if (parseFloat(data.walletbalance) > totalBlockAmount) {
+      newBalance -= totalBlockAmount;
+    } else {
+      newBalance -= parseFloat(data.walletbalance || '0');
+    }
+
+    await trx('UserWallet').where({ UserMobileNo: data.OrderBy }).update({
+      UserBlockedAmount: newBlocked.toFixed(2),
+      UserAmountInWallet: newBalance.toFixed(2),
+    });
+
+    for (const b of bookings) {
+      console.log(`📦 Assigning Helper ${b.helperId} to Booking ${b.bookingId}`);
+      const orderDetail = await trx('OrderBookingTable').where({ BookingId: b.bookingId }).first();
+      const helper = await trx('ZufyHelper').where({ HelperMobileNo: b.helperId }).first();
+
+      if (!orderDetail || !helper) {
+        console.log(`⚠️ Skipping - Missing data for bookingId: ${b.bookingId}`);
+        continue;
+      }
+
+      const otp = Math.floor(1000 + Math.random() * 9000).toString();
+      const currentTime = new Date();
+      const expireTime = new Date(currentTime.getTime() + 30 * 60000);
+      const expireSeconds = expireTime.getHours() * 3600 + expireTime.getMinutes() * 60 + expireTime.getSeconds();
+      await trx('OrderToHelper').insert({
+        OrderId: orderDetail.BookingId,
+        OrderBy: orderDetail.OrderBy,
+        OrderSendedTo: b.helperId,
+        OrderStatus: 'Assigned',
+        VerficationOtp: otp,
+        OrderExpire: expireSeconds.toString(),
+        UserLat: orderDetail.OrderGenratedLat,
+        UserLong: orderDetail.OrderGenratedLong,
+        UserRequestTime: b.job_time,
+        UserRequestDate: b.job_date,
+        UserName: orderDetail.UserName,
+        OrderItem: orderDetail.Itemsid,
+        AddonsMapped: orderDetail.AddonsMapped,
+        TotalAmountOrder: orderDetail.ItemTotalAmount,
+        AmountHelperGet: orderDetail.AmountHelperGet,
+        HelperHouse: orderDetail.Housetype,
+        PermanentAddress: orderDetail.useraddress,
+        ConvenienceFee: orderDetail.ConvenienceFee,
+        RazorpayOrderid: data.RazorpayOrderid,
+        RazorpayPaymentid: data.RazorpayPaymentid || '',
+      });
+
+      const jobDateTime = moment(`${b.job_date} ${b.job_time}`, 'YYYY-MM-DD hh:mm A');
+      const releaseDateTime = moment(jobDateTime).add(parseInt(b.duration || '60'), 'minutes');
+      const breakTime = moment(jobDateTime).add(parseInt(b.duration || '60') + 30, 'minutes');
+
+      await trx('HelperAvailabiltyTracking').insert({
+        HelperMobileNo: b.helperId,
+        HelperName: orderDetail.UserName,
+        BookingID: orderDetail.BookingId,
+        Duration: parseInt(b.duration || '60'),
+        BlockedDateTime: jobDateTime.toDate(),
+        ReleaseDateTime: releaseDateTime.toDate(),
+        BreakTime: breakTime.toDate(),
+        WorkStatus: 'Assigned',
+        BlockStatus: 'Blocked',
+        BlockReason: 'Work',
+      });
+
+      // const telegramMsg = `✅ New Booking Assigned\nBooking Id: ${orderDetail.BookingId}\nName: ${orderDetail.UserName}\nMobile: ${orderDetail.OrderBy}\nTime: ${b.job_time} on ${b.job_date}\nHelper: ${helper.HelperName}`;
+      // await trx.raw('EXEC telegram_order_request ?', [telegramMsg]);
+
+      await trx('OrderBookingTable')
+        .where({ BookingId: orderDetail.BookingId })
+        .update({
+          OrderTransaction: transactionNo,
+          OrderAcceptedBy: b.helperId,
+          OrderStatus: 'Assigned',
+           responseTime: b.job_date,
+        responseDates: b.job_time,
+        useraddress: orderDetail.useraddress,
+
+      });
+    }
+
+    await trx.commit();
+    console.log('✅ Booking Flow Completed');
+
+    successResponse(res, 'Booking, payment, assignment, and availability tracking completed', {
+      transactionNo,
+      bookings,
+    });
+  } catch (error: any) {
+    await trx.rollback();
+    console.error('❌ bookingFlowCombined error:', error);
+
+    await db('WebhookLog').insert({
+      Message: (error.message || String(error)).substring(0, 500),
+      Date: new Date(),
+      PaymentStatus: 'BookingFlowCombinedError',
+      RazorpayOrderid: data.RazorpayOrderid || 'NA',
+    });
+
+    errorResponse(res, 'Booking failed: ' + error.message, 500);
   }
 };
