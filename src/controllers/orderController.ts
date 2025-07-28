@@ -497,15 +497,23 @@ export const getUpcomingBookingOrder = async (req: Request, res: Response): Prom
       ORDER BY CAST(CONCAT(SUBSTRING(responseDates, 4, 2), '-', SUBSTRING(responseDates, 1, 2), '-', SUBSTRING(responseDates, 7, 4), ' ', responseTime) AS NVARCHAR) ASC
     `, [OrderBy]);
 
-    const rows = Array.isArray(rawResult[0]) ? rawResult[0] : [rawResult[0]];
-    console.log('Order Rows:', rows);
+    console.log('Raw Result:', rawResult);
+    const rows = Array.isArray(rawResult[0])
+      ? rawResult[0].filter(Boolean)
+      : Array.isArray(rawResult)
+        ? rawResult.filter(Boolean)
+        : [];
+    console.log('Filtered Rows:', rows);
+    if (rows.length === 0) {
+      return successResponse(res, 'No upcoming orders found', []);
+    }
 
     const supportContact = await db('OfferSettings').where({ status: 'Support' }).first();
     const responseArray: any[] = [];
-      console.log('Processing Row:----->', rows);
 
     for (const row of rows) {
-      console.log('Processing Row:----->', row);
+      if (!row || !row.Itemsid) continue;
+
       const jobTitle = await getJobTitle(row.Itemsid);
       const AddonsCounts = checkAddonsCount(row.AddonsMapped);
 
@@ -600,12 +608,7 @@ export const getAllUserRequests = async (req: Request, res: Response): Promise<v
       .where(function () {
         this.where('OrderBy', OrderBy).orWhere('OrderSendedTo', OrderBy);
       })
-      .whereIn('OrderStatus', ['Accepted', 'Active']);
-
-    // ⏳ Pending Orders (Only where OrderBy is the user)
-    const pendingOrders = await db('OrderToHelper')
-      .where('OrderBy', OrderBy)
-      .where('OrderStatus', 'Pending');
+      .whereIn('OrderStatus', ['Accepted', 'Active', 'Assigned']);
 
     // 🧩 Format all three
     const formatOrders = async (orders: any[]) => {
@@ -642,13 +645,12 @@ export const getAllUserRequests = async (req: Request, res: Response): Promise<v
       return results;
     };
 
-    const [past, current, pending] = await Promise.all([
+    const [past, current] = await Promise.all([
       formatOrders(pastOrders),
       formatOrders(currentOrders),
-      formatOrders(pendingOrders)
     ]);
 
-    successResponse(res, 'Fetched all user requests', { past, current, pending });
+    successResponse(res, 'Fetched all user requests', { past, current });
   } catch (err) {
     console.error('Error in /user/allRequests:', err);
     await db('WebhookLog').insert({
@@ -832,6 +834,7 @@ export const bookingFlowCombined = async (req: Request, res: Response): Promise<
         console.log(`⚠️ Skipping - Missing data for bookingId: ${b.bookingId}`);
         continue;
       }
+      debugger
 
       const otp = Math.floor(1000 + Math.random() * 9000).toString();
       const currentTime = new Date();
@@ -859,17 +862,22 @@ export const bookingFlowCombined = async (req: Request, res: Response): Promise<
         RazorpayOrderid: data.RazorpayOrderid,
         RazorpayPaymentid: data.RazorpayPaymentid || '',
       });
+      debugger
 
       const jobDateTime = moment(`${b.job_date} ${b.job_time}`, 'YYYY-MM-DD hh:mm A');
-      const releaseDateTime = moment(jobDateTime).add(parseInt(b.duration || '60'), 'minutes');
-      const breakTime = moment(jobDateTime).add(parseInt(b.duration || '60') + 30, 'minutes');
+      const durationMinutes = parseInt(b.duration || '60');
+
+      // Add +5.5 hours to adjust for IST manually
+      const istJobDateTime = moment(jobDateTime).add(5.5, 'hours');
+      const releaseDateTime = moment(istJobDateTime).add(durationMinutes, 'minutes');
+      const breakTime = moment(istJobDateTime).add(durationMinutes + 30, 'minutes');
 
       await trx('HelperAvailabiltyTracking').insert({
         HelperMobileNo: b.helperId,
         HelperName: orderDetail.UserName,
         BookingID: orderDetail.BookingId,
-        Duration: parseInt(b.duration || '60'),
-        BlockedDateTime: jobDateTime.toDate(),
+        Duration: durationMinutes,
+        BlockedDateTime: istJobDateTime.toDate(),
         ReleaseDateTime: releaseDateTime.toDate(),
         BreakTime: breakTime.toDate(),
         WorkStatus: 'Assigned',
@@ -886,11 +894,11 @@ export const bookingFlowCombined = async (req: Request, res: Response): Promise<
           OrderTransaction: transactionNo,
           OrderAcceptedBy: b.helperId,
           OrderStatus: 'Assigned',
-           responseTime: b.job_date,
-        responseDates: b.job_time,
-        useraddress: orderDetail.useraddress,
+          responseTime: b.job_time,
+          responseDates: b.job_date,
+          useraddress: orderDetail.useraddress,
 
-      });
+        });
     }
 
     await trx.commit();
