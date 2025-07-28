@@ -285,12 +285,13 @@ function getTimeAsMinutes(time: string): number {
 }
 
 function convertMinutesToTime(mins: number): string {
-  if (isNaN(mins)) return 'NA';
   const h = Math.floor(mins / 60);
   const m = mins % 60;
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+  return moment({ hour: h, minute: m }).format('hh:mm A');
+}
+
+function isSlotAvailable(blocked: { st: number; end: number }[], start: number, end: number): boolean {
+  return !blocked.some(({ st, end: bEnd }) => !(end <= st || start >= bEnd));
 }
 
 function checkAvailableTime(
@@ -302,6 +303,9 @@ function checkAvailableTime(
   suggested_t1: string;
   suggested_t2: string;
 } {
+  const WORK_START = 480; // 8:00 AM
+  const WORK_END = 1200;  // 8:00 PM
+
   if (isNaN(selectedMins)) {
     return {
       returnValue: 'NA',
@@ -310,46 +314,50 @@ function checkAvailableTime(
     };
   }
 
-  let isAvailable = true;
+  const jobEnd = selectedMins + jobDuration;
+  const isMainAvailable = isSlotAvailable(blocked, selectedMins, jobEnd);
 
-  for (const { st, end } of blocked) {
-    if (
-      (selectedMins >= st && selectedMins < end) ||
-      (selectedMins + jobDuration > st && selectedMins + jobDuration <= end)
-    ) {
-      isAvailable = false;
+  let suggested_t1 = 'NA';
+  let suggested_t2 = 'NA';
+
+  // 🧠 Go backward: look for earliest available slot before selectedMins
+  for (let t = WORK_START; t + jobDuration <= selectedMins; t += 30) {
+    if (isSlotAvailable(blocked, t, t + jobDuration)) {
+      suggested_t1 = convertMinutesToTime(t);
+        break;
+    } else {
+      // Once you hit conflict, stop checking further before
       break;
     }
   }
 
-  if (isAvailable) {
-    return {
-      returnValue: convertMinutesToTime(selectedMins),
-      suggested_t1: 'NA',
-      suggested_t2: 'NA',
-    };
-  } else {
-    const t1 = selectedMins - jobDuration >= 420 ? selectedMins - jobDuration : null;
-    const t2 = selectedMins + jobDuration <= 1200 ? selectedMins + jobDuration : null;
-    return {
-      returnValue: 'NA',
-      suggested_t1: t1 ? convertMinutesToTime(t1) : 'NA',
-      suggested_t2: t2 ? convertMinutesToTime(t2) : 'NA',
-    };
+  // 🚀 Go forward: look for next available slot after the end of all blocks
+  for (let t = selectedMins + 30; t + jobDuration <= WORK_END; t += 30) {
+    if (isSlotAvailable(blocked, t, t + jobDuration)) {
+      suggested_t2 = convertMinutesToTime(t);
+      break;
+    }
   }
+
+  return {
+    returnValue: isMainAvailable ? convertMinutesToTime(selectedMins) : 'NA',
+    suggested_t1,
+    suggested_t2,
+  };
 }
 
 export const getSuggestedHelpers = async (req: Request, res: Response): Promise<void> => {
   try {
     const { Mobilenos, UserMobile, date, requestedStartTime, jobDuration } = req.body;
 
-    // ✅ Convert DD-MM-YYYY to YYYY-MM-DD for SQL query
+
     const sqlDate = moment(date, 'DD-MM-YYYY').format('YYYY-MM-DD');
     const mobileNosArr = Mobilenos.split(',');
-
     const activeHelpersRaw = await db('ZufyHelper')
       .whereIn('HelperMobileNo', mobileNosArr)
       .andWhere({ HelperStatus: 'Active' });
+
+    console.log('🧍 Active Helpers Raw:', activeHelpersRaw);
 
     const activeHelpers = mobileNosArr
       .map((mobile: string) =>
@@ -357,29 +365,45 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
       )
       .filter(Boolean);
 
-    const results = [];
+    console.log('✅ Filtered Active Helpers:', activeHelpers);
 
-    // ✅ Ensure time is parsed from both 12-hr and 24-hr
     const time24 = moment(requestedStartTime, ['hh:mm A', 'HH:mm']).format('HH:mm');
     const selectedMins = getTimeAsMinutes(time24);
+    console.log('⏱️ Selected minutes from 00:00:', selectedMins);
+
+    const results = [];
 
     for (const helper of activeHelpers) {
       const helperMobile = helper.HelperMobileNo;
+      console.log(`\n📋 Checking helper: ${helperMobile}`);
 
       const tracking = await db('HelperAvailabiltyTracking')
         .whereRaw('CAST(BlockedDateTime AS DATE) = ?', [sqlDate])
         .andWhere({ HelperMobileNo: helperMobile });
 
-      const blocked = tracking.map((record: any) => {
+      console.log('📦 Tracking entries:', tracking.length, tracking);
+
+      const blocked = tracking.map((record: any, index: number) => {
         const start = new Date(record.BlockedDateTime);
-        const end = new Date(record.ReleaseDateTime);
-        return {
-          st: start.getHours() * 60 + start.getMinutes(),
-          end: end.getHours() * 60 + end.getMinutes(),
-        };
+        const breakEnd = new Date(record.BreakTime);
+
+        const st = start.getUTCHours() * 60 + start.getUTCMinutes();
+        const end = breakEnd.getUTCHours() * 60 + breakEnd.getUTCMinutes();
+
+        console.log(`🚫 Block ${index + 1}:`, {
+          BlockedDateTime: record.BlockedDateTime,
+          BreakTime: record.BreakTime,
+          startUTC: st,
+          endUTC: end,
+        });
+
+        return { st, end };
       });
 
+      console.log('🧱 Blocked intervals (in minutes):', blocked);
+
       const availableTimings = checkAvailableTime(blocked, selectedMins, jobDuration);
+      console.log('✅ Available Timings:', availableTimings);
 
       const userOrderCount = await db('OrderToHelper')
         .where({
@@ -403,7 +427,7 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
         HelperMobileNo: helper.HelperMobileNo,
         HelperName: helper.HelperName,
         HelperLanguageSpeak: helper.HelperLanguageSpeak,
-        HelperImage: "helper.HelperImage",
+        HelperImage: helper.HelperImage || '',
         KycVerified: helper.KycVerified,
         HelperRating: Number(avgRatingRow?.avg?.toFixed(1)) || 0,
         userOrderCount: Number(userOrderCount?.count) || 0,

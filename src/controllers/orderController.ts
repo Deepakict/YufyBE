@@ -497,13 +497,11 @@ export const getUpcomingBookingOrder = async (req: Request, res: Response): Prom
       ORDER BY CAST(CONCAT(SUBSTRING(responseDates, 4, 2), '-', SUBSTRING(responseDates, 1, 2), '-', SUBSTRING(responseDates, 7, 4), ' ', responseTime) AS NVARCHAR) ASC
     `, [OrderBy]);
 
-    console.log('Raw Result:', rawResult);
     const rows = Array.isArray(rawResult[0])
       ? rawResult[0].filter(Boolean)
       : Array.isArray(rawResult)
         ? rawResult.filter(Boolean)
         : [];
-    console.log('Filtered Rows:', rows);
     if (rows.length === 0) {
       return successResponse(res, 'No upcoming orders found', []);
     }
