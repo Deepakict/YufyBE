@@ -66,7 +66,7 @@ export const getJobListsOrder = async (req: Request, res: Response): Promise<voi
         JobsId: job.JobId,
         Jobs: job.Jobs,
         JobTitle: job.JobTitle,
-        JobImage: "job.JobImage",
+        JobImage: job.JobImage,
         Description: job.Description,
         TypeOfJob: job.TypeOfJob,
         Orderjobs: job.JobOrder,
@@ -116,11 +116,13 @@ export const getJobListsOrder = async (req: Request, res: Response): Promise<voi
             addon.ConvenienceFee = addonTariff[cf] ?? '0';
             addon.DiscountConvenienceFee = addonTariff[dcf] ?? '0';
             addon.Duration = addonTariff[dur] ?? '0';
+            addon.IncrementPrice = addonTariff.IncrementPrice ?? '0';
           } else {
             addon.Price = addonTariff.Price ?? '0';
             addon.Duration = addonTariff.IndividualJobDuration ?? '0';
             addon.ConvenienceFee = addonTariff.CF ?? '0';
             addon.DiscountConvenienceFee = addonTariff.DCF ?? '0';
+            addon.IncrementPrice = addonTariff.IncrementPrice ?? '0';
           }
 
           jobData.AddonsMapping.push(addon);
@@ -133,6 +135,7 @@ export const getJobListsOrder = async (req: Request, res: Response): Promise<voi
           jobData.Price = t[p] ?? '0';
           jobData.ConvenienceFee = t[cf] ?? '0';
           jobData.DiscountConvenienceFee = t[dcf] ?? '0';
+          jobData.IncrementPrice = t.IncrementPrice ?? '0';
           jobData.Duration = t[dur] ?? '0';
         };
 
@@ -297,14 +300,16 @@ function isSlotAvailable(blocked: { st: number; end: number }[], start: number, 
 function checkAvailableTime(
   blocked: { st: number; end: number }[],
   selectedMins: number,
-  jobDuration: number
+  jobDuration: number,
+  breakHours: number,
+  forceIdleHours: number
 ): {
   returnValue: string;
   suggested_t1: string;
   suggested_t2: string;
 } {
-  const WORK_START = 480; // 8:00 AM
-  const WORK_END = 1200;  // 8:00 PM
+  const WORK_START = 480;  // 8:00 AM
+  const WORK_END = 1200;   // 8:00 PM
 
   if (isNaN(selectedMins)) {
     return {
@@ -314,25 +319,40 @@ function checkAvailableTime(
     };
   }
 
+  let suggested_t1 = 'NA';
+  let suggested_t2 = 'NA';
+  let returnValue = 'NA';
+
+  const lastBreakTime = blocked.length > 0 ? Math.max(...blocked.map(b => b.end)) : 0;
+  const forceIdleEnd = lastBreakTime + forceIdleHours;
   const jobEnd = selectedMins + jobDuration;
   const isMainAvailable = isSlotAvailable(blocked, selectedMins, jobEnd);
 
-  let suggested_t1 = 'NA';
-  let suggested_t2 = 'NA';
+  if (isMainAvailable) {
+    returnValue = selectedMins < forceIdleEnd
+      ? convertMinutesToTime(lastBreakTime)
+      : convertMinutesToTime(selectedMins);
+  } else {
+    // 🔍 Find the earliest possible slot (from WORK_START to WORK_END)
+    for (let t = WORK_START; t + jobDuration <= WORK_END; t += breakHours) {
+      if (isSlotAvailable(blocked, t, t + jobDuration)) {
+        returnValue = convertMinutesToTime(t);
+        break;
+      }
+    }
+  }
 
-  // 🧠 Go backward: look for earliest available slot before selectedMins
-  for (let t = WORK_START; t + jobDuration <= selectedMins; t += 30) {
+  // ⬅️ Suggestion before selected time
+  for (let t = WORK_START; t + jobDuration <= selectedMins; t += breakHours) {
     if (isSlotAvailable(blocked, t, t + jobDuration)) {
       suggested_t1 = convertMinutesToTime(t);
-        break;
-    } else {
-      // Once you hit conflict, stop checking further before
       break;
     }
   }
 
-  // 🚀 Go forward: look for next available slot after the end of all blocks
-  for (let t = selectedMins + 30; t + jobDuration <= WORK_END; t += 30) {
+  // ➡️ Suggestion after selected or forced idle end
+  const forwardStart = Math.max(selectedMins + breakHours, forceIdleEnd);
+  for (let t = forwardStart; t + jobDuration <= WORK_END; t += breakHours) {
     if (isSlotAvailable(blocked, t, t + jobDuration)) {
       suggested_t2 = convertMinutesToTime(t);
       break;
@@ -340,7 +360,7 @@ function checkAvailableTime(
   }
 
   return {
-    returnValue: isMainAvailable ? convertMinutesToTime(selectedMins) : 'NA',
+    returnValue,
     suggested_t1,
     suggested_t2,
   };
@@ -352,7 +372,9 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
 
 
     const sqlDate = moment(date, 'DD-MM-YYYY').format('YYYY-MM-DD');
-    const mobileNosArr = Mobilenos.split(',');
+    // const mobileNosArr = Mobilenos.split(',');
+    const mobileNosArr = ['9972063553'];
+
     const activeHelpersRaw = await db('ZufyHelper')
       .whereIn('HelperMobileNo', mobileNosArr)
       .andWhere({ HelperStatus: 'Active' });
@@ -365,7 +387,7 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
       )
       .filter(Boolean);
 
-    console.log('✅ Filtered Active Helpers:', activeHelpers);
+    // console.log('✅ Filtered Active Helpers:', activeHelpers);
 
     const time24 = moment(requestedStartTime, ['hh:mm A', 'HH:mm']).format('HH:mm');
     const selectedMins = getTimeAsMinutes(time24);
@@ -375,7 +397,7 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
 
     for (const helper of activeHelpers) {
       const helperMobile = helper.HelperMobileNo;
-      console.log(`\n📋 Checking helper: ${helperMobile}`);
+      // console.log(`\n📋 Checking helper: ${helperMobile}`);
 
       const tracking = await db('HelperAvailabiltyTracking')
         .whereRaw('CAST(BlockedDateTime AS DATE) = ?', [sqlDate])
@@ -383,6 +405,17 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
 
       console.log('📦 Tracking entries:', tracking.length, tracking);
 
+      const generalSettings = await db('GeneralSettings')
+        .select('title', 'description')
+        .whereIn('title', ['BreakHours', 'ForceIdleHours']);
+
+      const settingsMap = generalSettings.reduce((acc: Record<string, string>, setting: any) => {
+        acc[setting.title] = setting.description;
+        return acc;
+      }, {});
+
+      const breakHours = Number(settingsMap['BreakHours']);
+      const forceIdleHours = Number(settingsMap['ForceIdleHours']);
       const blocked = tracking.map((record: any, index: number) => {
         const start = new Date(record.BlockedDateTime);
         const breakEnd = new Date(record.BreakTime);
@@ -402,7 +435,7 @@ export const getSuggestedHelpers = async (req: Request, res: Response): Promise<
 
       console.log('🧱 Blocked intervals (in minutes):', blocked);
 
-      const availableTimings = checkAvailableTime(blocked, selectedMins, jobDuration);
+      const availableTimings = checkAvailableTime(blocked, selectedMins, jobDuration, Number(breakHours),Number(forceIdleHours));
       console.log('✅ Available Timings:', availableTimings);
 
       const userOrderCount = await db('OrderToHelper')

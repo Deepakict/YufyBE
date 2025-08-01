@@ -137,3 +137,38 @@ export const checkAddonsCount = (addonsMapped: string): number => {
     return 0;
   }
 };
+
+export const getJobImage = async (jobIdCsv: string): Promise<string[]> => {
+  if (!jobIdCsv) return [];
+
+  const jobIds = jobIdCsv.split(',').map(id => id.trim());
+  const allJobs = await db('JobsTable').select('JobId', 'JobImage');
+
+  const images: string[] = [];
+
+  for (const jobId of jobIds) {
+    const match = allJobs.find(j => j.JobId?.split(',').includes(jobId));
+    if (match && match.JobImage) {
+      images.push(match.JobImage);
+    }
+  }
+
+  return images;
+};
+// export const getJobTitle = async (jobIdCsv: string): Promise<string[]> => {
+//   if (!jobIdCsv) return [];
+
+//   const jobIds = jobIdCsv.split(',').map(id => id.trim());
+//   const allJobs = await db('JobsTable').select('JobId', 'JobTitle');
+
+//   const titles: string[] = [];
+
+//   for (const jobId of jobIds) {
+//     const match = allJobs.find(j => j.JobId?.split(',').includes(jobId));
+//     if (match && match.JobTitle) {
+//       titles.push(match.JobTitle);
+//     }
+//   }
+
+//   return titles;
+// };
