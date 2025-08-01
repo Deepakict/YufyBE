@@ -4,6 +4,7 @@ import jobRoutes from './routes/jobRoutes'; // ✅ Make sure file name matches e
 import zoneRoutes from './routes/zoneRoutes'; // ✅ Make sure file name matches exactly
 import walletRoutes from './routes/walletRoutes'; // ✅ Make sure file name matches exactly
 import orderRoutes from './routes/orderRoutes'; 
+import ratingRoutes from './routes/ratingRoutes'; 
 
 const app = express();
 
@@ -13,5 +14,6 @@ app.use('/api/job', jobRoutes);
 app.use('/api/zone', zoneRoutes);
 app.use('/api/wallet',walletRoutes)
 app.use('/api/order',orderRoutes)
+app.use('/api/rating',ratingRoutes)
 
 export default app;

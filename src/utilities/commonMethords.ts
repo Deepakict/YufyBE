@@ -155,20 +155,52 @@ export const getJobImage = async (jobIdCsv: string): Promise<string[]> => {
 
   return images;
 };
-// export const getJobTitle = async (jobIdCsv: string): Promise<string[]> => {
-//   if (!jobIdCsv) return [];
 
-//   const jobIds = jobIdCsv.split(',').map(id => id.trim());
-//   const allJobs = await db('JobsTable').select('JobId', 'JobTitle');
+export const checkAndGetAddonsCount = async (addonsString: string): Promise<any[]> => {
+  const JobsArray: any[] = [];
+  if (!addonsString || addonsString === 'undefined' || addonsString.trim() === '') {
+    return JobsArray;
+  }
 
-//   const titles: string[] = [];
+  try {
+    const addonObjects: any[] = JSON.parse(addonsString); // Top level array of objects
 
-//   for (const jobId of jobIds) {
-//     const match = allJobs.find(j => j.JobId?.split(',').includes(jobId));
-//     if (match && match.JobTitle) {
-//       titles.push(match.JobTitle);
-//     }
-//   }
+    for (const obj of addonObjects) {
+      const serialized = JSON.stringify(obj);
+      const dist: Record<string, any> = JSON.parse(serialized); // Main jobId : nestedAddonObject
 
-//   return titles;
-// };
+      for (const jobId in dist) {
+        const AddonsArray: any[] = [];
+        const innerAddons: Record<string, any> = JSON.parse(JSON.stringify(dist[jobId]));
+
+        for (const addonId in innerAddons) {
+          const jobname = await db('JobsTable').where('JobId', addonId).first();
+
+          if (!jobname) continue;
+
+          const addonTitle = jobname.JobTitle;
+          const typeOfJob = jobname.TypeOfJob;
+
+          const addonObject: Record<string, string> = {
+            [addonTitle]: typeOfJob === 'Single' ? '0' : String(innerAddons[addonId])
+          };
+
+          AddonsArray.push(addonObject);
+        }
+
+        const job = await db('JobsTable').where('JobId', jobId).first();
+        if (!job) continue;
+
+        const JobObject: Record<string, any> = {
+          [job.JobTitle]: AddonsArray
+        };
+
+        JobsArray.push(JobObject);
+      }
+    }
+  } catch (err) {
+    console.error('Error in checkAddonsCount:', err);
+  }
+
+  return JobsArray;
+};
